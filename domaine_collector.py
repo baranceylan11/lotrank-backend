@@ -28,75 +28,51 @@ def parse_domaine_text(text):
         "brand": extract(
             r"Marque Véhicule[ \t]+([^\n]+)"
         ),
-
         "model": extract(
             r"Modèle Véhicule[ \t]+([^\n]+)"
         ),
-
         "year": (
             int(date_first_registration[-4:])
             if date_first_registration
             else None
         ),
-
         "mileage_km": (
             int(mileage.replace(" ", ""))
             if mileage
             else None
         ),
-
         "fuel_type": extract(
             r"Energie / carburant[ \t]+([^\n]+)"
         ),
-
         "transmission": extract(
             r"Type de boîte[ \t]+([^\n]+)"
         ),
-
         "current_bid": (
             int(bid.replace(" ", ""))
             if bid
             else None
         ),
-
         "auction_fee_pct": 11,
-
-        "reserved_for_pros":
-            "RÉSERVÉ AUX PROS" in clean.upper(),
-
+        "reserved_for_pros": "RÉSERVÉ AUX PROS" in clean.upper(),
         "registration_certificate": extract(
             r"Certificat d'immatriculation[ \t]+([^\n]+)"
         ),
-
         "has_key": extract(
             r"Présence d'au moins une clé[ \t]+([^\n]+)"
         ),
-
         "location": extract(
             r"Dépôt\s*:\s*([^\n]+)"
         ),
-
         "risk_flags": []
     }
 
     risk_checks = {
-        "mileage_not_guaranteed":
-            "km non garantis",
-
-        "missing_original_registration":
-            "absence carte grise originale",
-
-        "moldy_interior":
-            "intérieur moisi",
-
-        "particle_filter_fault":
-            "filtres particules hs",
-
-        "body_damage":
-            "coups, chocs, rayures",
-
-        "general_wear":
-            "vétusté générale"
+        "mileage_not_guaranteed": "km non garantis",
+        "missing_original_registration": "absence carte grise originale",
+        "moldy_interior": "intérieur moisi",
+        "particle_filter_fault": "filtres particules hs",
+        "body_damage": "coups, chocs, rayures",
+        "general_wear": "vétusté générale"
     }
 
     lower_text = clean.lower()
@@ -125,9 +101,11 @@ async def collect_domaine_lot(url):
 
         await page.goto(
             url,
-            wait_until="networkidle",
+            wait_until="domcontentloaded",
             timeout=60000
         )
+
+        await page.wait_for_timeout(8000)
 
         text = await page.locator("body").inner_text()
         title = await page.title()
@@ -139,14 +117,10 @@ async def collect_domaine_lot(url):
             "url": url,
             "page_title": title,
             "parsed": parsed,
-            "contains_audi":
-                "AUDI" in text.upper(),
-            "contains_q7":
-                "Q7" in text.upper(),
-            "contains_km":
-                "245200" in text.replace(" ", ""),
-            "text_preview":
-                text[:2000]
+            "contains_audi": "AUDI" in text.upper(),
+            "contains_q7": "Q7" in text.upper(),
+            "contains_km": "245200" in text.replace(" ", ""),
+            "text_preview": text[:2000]
         }
 
         await browser.close()
