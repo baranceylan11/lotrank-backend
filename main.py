@@ -95,3 +95,56 @@ def get_listings():
             "status": "error",
             "detail": str(e)
         }
+@app.get("/listings-with-analysis")
+def get_listings_with_analysis():
+    try:
+        conn = psycopg2.connect(os.environ["DATABASE_URL"])
+        cur = conn.cursor()
+
+        cur.execute("""
+            SELECT
+                l.id,
+                l.title,
+                l.category,
+                l.brand,
+                l.model,
+                l.year,
+                l.mileage_km,
+                l.fuel_type,
+                l.transmission,
+                l.location,
+                l.status,
+                l.closing_at,
+                l.jump_url,
+                s.lotrank_score,
+                s.confidence,
+                s.lotrank_max,
+                r.flag_type,
+                r.description
+            FROM listings l
+            LEFT JOIN scores s
+                ON s.listing_id = l.id
+            LEFT JOIN risk_flags r
+                ON r.listing_id = l.id
+            ORDER BY l.created_at DESC
+            LIMIT 50;
+        """)
+
+        rows = cur.fetchall()
+        columns = [desc[0] for desc in cur.description]
+        data = [dict(zip(columns, row)) for row in rows]
+
+        cur.close()
+        conn.close()
+
+        return {
+            "status": "ok",
+            "count": len(data),
+            "listings": data
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "detail": str(e)
+        }
