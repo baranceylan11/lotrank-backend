@@ -9,9 +9,12 @@ from playwright.async_api import async_playwright
 
 
 BASE_URL = "https://www.lacentrale.fr"
+
 MAX_COMPARABLES = 15
 MAX_DETAIL_LINKS = 30
-PAGE_WAIT_MS = 2500
+
+SEARCH_WAIT_MS = 4000
+DETAIL_WAIT_MS = 1500
 
 MODEL_ALIASES = {
     ("PEUGEOT", "208"): "peugeot-208",
@@ -42,25 +45,45 @@ class Comparable:
 def normalize_text(value: Optional[str]) -> str:
     if not value:
         return ""
-    return " ".join(str(value).upper().split())
+
+    return " ".join(
+        str(value).upper().split()
+    )
 
 
 def slugify(value: str) -> str:
     value = value.strip().lower()
-    value = re.sub(r"[^a-z0-9]+", "-", value)
+
+    value = re.sub(
+        r"[^a-z0-9]+",
+        "-",
+        value,
+    )
+
     return value.strip("-")
 
 
-def build_model_slug(brand: str, model: str) -> str:
-    key = (normalize_text(brand), normalize_text(model))
+def build_model_slug(
+    brand: str,
+    model: str,
+) -> str:
+    key = (
+        normalize_text(brand),
+        normalize_text(model),
+    )
 
     if key in MODEL_ALIASES:
         return MODEL_ALIASES[key]
 
-    return f"{slugify(brand)}-{slugify(model)}"
+    return (
+        f"{slugify(brand)}-"
+        f"{slugify(model)}"
+    )
 
 
-def build_search_url(target: VehicleTarget) -> str:
+def build_search_url(
+    target: VehicleTarget,
+) -> str:
     model_slug = build_model_slug(
         target.brand,
         target.model,
@@ -68,87 +91,134 @@ def build_search_url(target: VehicleTarget) -> str:
 
     return (
         f"{BASE_URL}/"
-        f"occasion-voiture-modele-{model_slug}.html"
+        f"occasion-voiture-modele-"
+        f"{model_slug}.html"
     )
 
 
-def parse_price(text: str) -> Optional[float]:
-    pattern = (
-        r"(\d{1,3}(?:[ \u202f]\d{3})+|\d{4,6})"
-        r"\s*€"
-    )
-
-    match = re.search(
-        pattern,
+def parse_price(
+    text: str,
+) -> Optional[float]:
+    matches = re.findall(
+        (
+            r"(\d{1,3}"
+            r"(?:[ \u00a0\u202f]\d{3})+"
+            r"|\d{4,6})"
+            r"\s*€"
+        ),
         text,
+    )
+
+    for match in matches:
+        raw = re.sub(
+            r"[ \u00a0\u202f]",
+            "",
+            match,
+        )
+
+        try:
+            price = float(raw)
+        except ValueError:
+            continue
+
+        if (
+            500
+            <= price
+            <= 500000
+        ):
+            return price
+
+    return None
+
+
+def parse_year(
+    text: str,
+) -> Optional[int]:
+    match = re.search(
+        r"\bAnnée\s+(19\d{2}|20\d{2})\b",
+        text,
+        re.IGNORECASE,
     )
 
     if not match:
         return None
 
-    raw = re.sub(
-        r"[ \u202f]",
-        "",
-        match.group(1),
+    return int(
+        match.group(1)
     )
 
-    try:
-        price = float(raw)
-    except ValueError:
-        return None
 
-    if 500 <= price <= 500000:
-        return price
-
-    return None
-
-
-def parse_year(text: str) -> Optional[int]:
-    match = re.search(
-        r"\bAnnée\s*(20\d{2}|19\d{2})\b",
+def parse_mileage(
+    text: str,
+) -> Optional[int]:
+    mileage_section = re.search(
+        (
+            r"Kilométrage"
+            r".{0,500}?"
+            r"(\d{1,3}"
+            r"(?:[ \u00a0\u202f]\d{3})+"
+            r"|\d{4,6})"
+            r"\s*km"
+        ),
         text,
-        re.IGNORECASE,
+        re.IGNORECASE
+        | re.DOTALL,
     )
 
-    if match:
-        return int(
-            match.group(1)
+    if mileage_section:
+        raw = re.sub(
+            r"[ \u00a0\u202f]",
+            "",
+            mileage_section.group(1),
         )
 
-    return None
+        try:
+            return int(raw)
+        except ValueError:
+            pass
 
-
-def parse_mileage(text: str) -> Optional[int]:
-    match = re.search(
+    matches = re.findall(
         (
-            r"(\d{1,3}(?:[ \u202f]\d{3})+|"
-            r"\d{4,6})\s*km\b"
+            r"(\d{1,3}"
+            r"(?:[ \u00a0\u202f]\d{3})+"
+            r"|\d{4,6})"
+            r"\s*km\b"
         ),
         text,
         re.IGNORECASE,
     )
 
-    if not match:
-        return None
+    for match in matches:
+        raw = re.sub(
+            r"[ \u00a0\u202f]",
+            "",
+            match,
+        )
 
-    raw = re.sub(
-        r"[ \u202f]",
-        "",
-        match.group(1),
-    )
+        try:
+            mileage = int(raw)
+        except ValueError:
+            continue
 
-    try:
-        return int(raw)
-    except ValueError:
-        return None
+        if (
+            100
+            <= mileage
+            <= 1000000
+        ):
+            return mileage
+
+    return None
 
 
-def parse_fuel(text: str) -> Optional[str]:
+def parse_fuel(
+    text: str,
+) -> Optional[str]:
     match = re.search(
         (
-            r"Énergie\s*"
-            r"(Essence|Diesel|Electrique|"
-            r"Électrique|Hybride)"
+            r"Énergie\s+"
+            r"(Essence|Diesel|"
+            r"Électrique|Electrique|"
+            r"Hybride)"
         ),
         text,
         re.IGNORECASE,
@@ -180,7 +250,7 @@ def parse_transmission(
 ) -> Optional[str]:
     match = re.search(
         (
-            r"Boîte de vitesse\s*"
+            r"Boîte de vitesse\s+"
             r"(Automatique|Manuelle|Auto)"
         ),
         text,
@@ -255,28 +325,29 @@ def is_similar(
     target: VehicleTarget,
     comparable: Comparable,
 ) -> bool:
-    if (
-        abs(
-            comparable.year
-            - target.year
-        )
-        > 1
-    ):
+    year_difference = abs(
+        comparable.year
+        - target.year
+    )
+
+    if year_difference > 1:
         return False
 
     mileage_tolerance = max(
         25000,
         int(
             target.mileage_km
-            * 0.25
+            * 0.30
         ),
     )
 
+    mileage_difference = abs(
+        comparable.mileage_km
+        - target.mileage_km
+    )
+
     if (
-        abs(
-            comparable.mileage_km
-            - target.mileage_km
-        )
+        mileage_difference
         > mileage_tolerance
     ):
         return False
@@ -290,8 +361,8 @@ def is_similar(
     if (
         target_fuel
         and comparable.fuel_type
-        and comparable.fuel_type
-        != target_fuel
+        and target_fuel
+        != comparable.fuel_type
     ):
         return False
 
@@ -304,8 +375,8 @@ def is_similar(
     if (
         target_transmission
         and comparable.transmission
-        and comparable.transmission
-        != target_transmission
+        and target_transmission
+        != comparable.transmission
     ):
         return False
 
@@ -331,6 +402,7 @@ def remove_price_outliers(
 
     q1 = quartiles[0]
     q3 = quartiles[2]
+
     iqr = q3 - q1
 
     lower_bound = (
@@ -385,18 +457,23 @@ def calculate_market_summary(
             method="inclusive",
         )
 
-        low_price = quartiles[0]
-        high_price = quartiles[2]
+        low_market_price = quartiles[0]
+        high_market_price = quartiles[2]
 
     else:
-        low_price = min(prices)
-        high_price = max(prices)
+        low_market_price = min(
+            prices
+        )
+
+        high_market_price = max(
+            prices
+        )
 
     return {
         "status": "OK",
         "count": len(prices),
         "low_market_price": round(
-            low_price,
+            low_market_price,
             2,
         ),
         "median_market_price": round(
@@ -404,7 +481,7 @@ def calculate_market_summary(
             2,
         ),
         "high_market_price": round(
-            high_price,
+            high_market_price,
             2,
         ),
         "min_price": round(
@@ -434,16 +511,17 @@ async def collect_detail_links(
     )
 
     await page.wait_for_timeout(
-        PAGE_WAIT_MS
+        SEARCH_WAIT_MS
     )
 
-    hrefs = await page.locator(
-        'a[href*="/auto-occasion-annonce-"]'
+    all_hrefs = await page.locator(
+        "a"
     ).evaluate_all(
         """
         elements => elements
             .map(
                 element =>
+                    element.href ||
                     element.getAttribute('href')
             )
             .filter(Boolean)
@@ -452,16 +530,24 @@ async def collect_detail_links(
 
     links = []
 
-    for href in hrefs:
+    for href in all_hrefs:
+        if (
+            "auto-occasion-annonce-"
+            not in href
+        ):
+            continue
+
         full_url = urljoin(
             BASE_URL,
             href,
         )
 
-        if full_url not in links:
-            links.append(
-                full_url
-            )
+        if full_url in links:
+            continue
+
+        links.append(
+            full_url
+        )
 
         if (
             len(links)
@@ -473,6 +559,12 @@ async def collect_detail_links(
         "Candidate detail links:",
         len(links),
     )
+
+    if links:
+        print(
+            "First candidate:",
+            links[0],
+        )
 
     return links
 
@@ -488,12 +580,14 @@ async def collect_comparable(
     )
 
     await page.wait_for_timeout(
-        1200
+        DETAIL_WAIT_MS
     )
 
-    text = await page.locator(
+    body = page.locator(
         "body"
-    ).inner_text()
+    )
+
+    text = await body.inner_text()
 
     title = await page.title()
 
@@ -509,6 +603,25 @@ async def collect_comparable(
         text
     )
 
+    fuel = parse_fuel(
+        text
+    )
+
+    transmission = (
+        parse_transmission(
+            text
+        )
+    )
+
+    print(
+        "Parsed:",
+        year,
+        mileage,
+        price,
+        fuel,
+        transmission,
+    )
+
     if (
         price is None
         or year is None
@@ -522,14 +635,8 @@ async def collect_comparable(
         year=year,
         mileage_km=mileage,
         price_eur=price,
-        fuel_type=parse_fuel(
-            text
-        ),
-        transmission=(
-            parse_transmission(
-                text
-            )
-        ),
+        fuel_type=fuel,
+        transmission=transmission,
     )
 
 
@@ -588,12 +695,20 @@ async def get_market_price(
                     )
 
                     if comparable is None:
+                        print(
+                            "Rejected:",
+                            "missing data",
+                        )
                         continue
 
                     if not is_similar(
                         target,
                         comparable,
                     ):
+                        print(
+                            "Rejected:",
+                            "not similar",
+                        )
                         continue
 
                     comparables.append(
@@ -601,7 +716,7 @@ async def get_market_price(
                     )
 
                     print(
-                        "Comparable",
+                        "Accepted comparable",
                         len(comparables),
                         "-",
                         comparable.year,
@@ -687,12 +802,16 @@ async def main():
 
     print(
         "Status:",
-        result.get("status"),
+        result.get(
+            "status"
+        ),
     )
 
     print(
         "Comparables:",
-        result.get("count"),
+        result.get(
+            "count"
+        ),
     )
 
     print(
