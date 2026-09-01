@@ -1,5 +1,6 @@
 import os
 import re
+import statistics
 import requests
 from bs4 import BeautifulSoup
 
@@ -11,6 +12,13 @@ TARGET_URL = (
     "occasion-voiture-modele-peugeot-208.html"
 )
 
+TARGET_YEAR = 2019
+TARGET_MILEAGE = 92910
+TARGET_FUEL = "ESSENCE"
+
+MIN_MILEAGE = 60000
+MAX_MILEAGE = 125000
+
 
 def clean_text(value: str) -> str:
     value = value.replace("\u00a0", " ")
@@ -18,20 +26,87 @@ def clean_text(value: str) -> str:
     return re.sub(r"\s+", " ", value).strip()
 
 
+def parse_number(value: str) -> int:
+    return int(re.sub(r"\D", "", value))
+
+
+def extract_comparables(text: str) -> list:
+    pattern = re.compile(
+        r"PEUGEOT\s+208"
+        r".{0,180}?"
+        r"\b(20\d{2})\b"
+        r"\s+"
+        r"(?:Manuelle|Auto|Automatique)"
+        r"\s+"
+        r"(\d{1,3}(?:\s\d{3})+|\d{4,6})\s*km"
+        r"\s+"
+        r"(Essence|Diesel|Électrique|Electrique|Hybride)"
+        r"\s+"
+        r"(\d{1,3}(?:\s\d{3})+|\d{3,6})\s*€",
+        re.IGNORECASE,
+    )
+
+    results = []
+
+    for match in pattern.finditer(text):
+        year = int(match.group(1))
+        mileage = parse_number(match.group(2))
+        fuel = match.group(3).upper()
+        price = parse_number(match.group(4))
+
+        if year != TARGET_YEAR:
+            continue
+
+        if fuel not in ("ESSENCE",):
+            continue
+
+        if not MIN_MILEAGE <= mileage <= MAX_MILEAGE:
+            continue
+
+        if not 1000 <= price <= 100000:
+            continue
+
+        results.append(
+            {
+                "year": year,
+                "mileage": mileage,
+                "fuel": fuel,
+                "price": price,
+            }
+        )
+
+    unique = []
+    seen = set()
+
+    for item in results:
+        key = (
+            item["year"],
+            item["mileage"],
+            item["fuel"],
+            item["price"],
+        )
+
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+
+    return unique
+
+
 def main() -> None:
-    print("=== ZENROWS LACENTRALE TEST START ===")
-    print("Target:", TARGET_URL)
+    print("=== LACENTRALE MARKET ENGINE START ===")
+    print("Target vehicle: PEUGEOT 208")
+    print("Target year:", TARGET_YEAR)
+    print("Target mileage:", TARGET_MILEAGE)
+    print("Target fuel:", TARGET_FUEL)
     print("Database writes: no")
 
     api_key = os.environ.get("ZENROWS_API_KEY")
 
     if not api_key:
         print("Status: MISSING_API_KEY")
-        print("ZENROWS_API_KEY was not found.")
-        print("=== ZENROWS LACENTRALE TEST END ===")
+        print("=== LACENTRALE MARKET ENGINE END ===")
         return
-
-    print("API key configured: yes")
 
     params = {
         "url": TARGET_URL,
@@ -50,25 +125,20 @@ def main() -> None:
 
     except requests.RequestException as error:
         print("Status: REQUEST_FAILED")
-        print("Error type:", type(error).__name__)
         print("Error:", str(error))
-        print("=== ZENROWS LACENTRALE TEST END ===")
+        print("=== LACENTRALE MARKET ENGINE END ===")
         return
 
     print("ZenRows HTTP status:", response.status_code)
-    print(
-        "Content-Type:",
-        response.headers.get("content-type"),
-    )
     print("Response bytes:", len(response.content))
 
     if response.status_code != 200:
         print("Status: ZENROWS_ERROR")
         print(
             "Response preview:",
-            clean_text(response.text)[:1200],
+            clean_text(response.text)[:1000],
         )
-        print("=== ZENROWS LACENTRALE TEST END ===")
+        print("=== LACENTRALE MARKET ENGINE END ===")
         return
 
     soup = BeautifulSoup(
@@ -80,104 +150,53 @@ def main() -> None:
         soup.get_text(" ", strip=True)
     )
 
-    page_title = ""
+    comparables = extract_comparables(page_text)
 
-    if soup.title:
-        page_title = clean_text(
-            soup.title.get_text(
-                " ",
-                strip=True,
-            )
-        )
+    print("Comparables found:", len(comparables))
 
-    lower_text = page_text.lower()
-
-    price_matches = re.findall(
-        r"\b\d{1,3}(?:[ .]\d{3})+\s*€",
-        page_text,
-    )
-
-    mileage_matches = re.findall(
-        r"\b\d{1,3}(?:[ .]\d{3})+\s*km\b",
-        page_text,
-        re.IGNORECASE,
-    )
-
-    vehicle_links = []
-
-    for link in soup.find_all(
-        "a",
-        href=True,
+    for index, vehicle in enumerate(
+        comparables,
+        start=1,
     ):
-        href = link.get("href", "")
-
-        if "auto-occasion-annonce-" in href:
-            vehicle_links.append(href)
-
-    vehicle_links = list(
-        dict.fromkeys(vehicle_links)
-    )
-
-    blocked_terms = (
-        "access denied",
-        "forbidden",
-        "captcha",
-        "please enable js",
-        "verify you are human",
-    )
-
-    blocked = any(
-        term in lower_text
-        for term in blocked_terms
-    )
-
-    print("Page title:", page_title[:200])
-    print(
-        "Visible text length:",
-        len(page_text),
-    )
-    print(
-        "Price patterns found:",
-        len(price_matches),
-    )
-    print(
-        "Mileage patterns found:",
-        len(mileage_matches),
-    )
-    print(
-        "Vehicle links found:",
-        len(vehicle_links),
-    )
-    print(
-        "Blocked page detected:",
-        "yes" if blocked else "no",
-    )
-
-    if (
-        len(page_text) > 1000
-        and len(price_matches) > 0
-        and len(mileage_matches) > 0
-    ):
-        print("Status: OK")
-
-    elif blocked:
-        print("Status: BLOCKED")
-
-    else:
-        print("Status: NO_LISTING_DATA")
-
-    print(
-        "Text preview:",
-        page_text[:1500],
-    )
-
-    if vehicle_links:
         print(
-            "First vehicle link:",
-            vehicle_links[0],
+            f"Comparable {index}: "
+            f"{vehicle['year']} | "
+            f"{vehicle['mileage']} km | "
+            f"{vehicle['fuel']} | "
+            f"{vehicle['price']} EUR"
         )
 
-    print("=== ZENROWS LACENTRALE TEST END ===")
+    if not comparables:
+        print("Status: NO_COMPARABLES")
+        print("=== LACENTRALE MARKET ENGINE END ===")
+        return
+
+    prices = sorted(
+        item["price"]
+        for item in comparables
+    )
+
+    low_price = min(prices)
+    median_price = int(statistics.median(prices))
+    high_price = max(prices)
+
+    average_mileage = int(
+        statistics.mean(
+            item["mileage"]
+            for item in comparables
+        )
+    )
+
+    print("===== MARKET SUMMARY =====")
+    print("Status: OK")
+    print("Comparables:", len(comparables))
+    print("Low market price:", low_price)
+    print("Median market price:", median_price)
+    print("High market price:", high_price)
+    print("Average mileage:", average_mileage)
+    print("===== MARKET SUMMARY END =====")
+
+    print("=== LACENTRALE MARKET ENGINE END ===")
 
 
 if __name__ == "__main__":
