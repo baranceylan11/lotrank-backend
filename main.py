@@ -560,3 +560,196 @@ def score_listing(listing_id: str, data: LotRankInput):
             "status": "error",
             "detail": str(e)
         }
+# =========================================================
+# CREATE LISTING + AUTO SCORE
+# =========================================================
+
+class CreateListingAndScoreInput(BaseModel):
+    source_id: str | None = None
+    raw_listing_id: str | None = None
+
+    title: str
+    category: str | None = None
+    brand: str | None = None
+    model: str | None = None
+    year: int | None = None
+    mileage_km: int | None = None
+    fuel_type: str | None = None
+    transmission: str | None = None
+    location: str | None = None
+    status: str = "active"
+    jump_url: str | None = None
+
+    market_value: float
+    safe_sale_value: float
+    current_bid: float
+
+    auction_fees: float = 0
+    transport_cost: float = 0
+    repair_cost: float = 0
+    other_costs: float = 0
+
+    target_profit: float = 0
+    risk_reserve: float = 0
+
+    comparable_count: int = 0
+    comparable_dispersion_high: bool = False
+
+    condition_penalty: float = 0
+
+    liquidity_level: int = 5
+    competition_level: int = 5
+    source_trust_level: int = 3
+
+    vehicle_identity_quality: float = 100
+    auction_data_quality: float = 100
+    condition_data_quality: float = 100
+    cost_data_quality: float = 100
+
+
+@app.post("/create-listing-and-score")
+def create_listing_and_score(data: CreateListingAndScoreInput):
+
+    conn = None
+    cur = None
+
+    try:
+        conn = psycopg2.connect(
+            os.environ["DATABASE_URL"]
+        )
+        cur = conn.cursor()
+
+        cur.execute(
+            """
+            INSERT INTO listings (
+                raw_listing_id,
+                source_id,
+                title,
+                category,
+                brand,
+                model,
+                year,
+                mileage_km,
+                fuel_type,
+                transmission,
+                location,
+                status,
+                jump_url,
+                created_at,
+                updated_at
+            )
+            VALUES (
+                %s::uuid,
+                %s::uuid,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                NOW(),
+                NOW()
+            )
+            RETURNING id;
+            """,
+            (
+                data.raw_listing_id,
+                data.source_id,
+                data.title,
+                data.category,
+                data.brand,
+                data.model,
+                data.year,
+                data.mileage_km,
+                data.fuel_type,
+                data.transmission,
+                data.location,
+                data.status,
+                data.jump_url
+            )
+        )
+
+        listing_id = cur.fetchone()[0]
+
+        scoring_input = LotRankInput(
+            market_value=data.market_value,
+            safe_sale_value=data.safe_sale_value,
+            current_bid=data.current_bid,
+            auction_fees=data.auction_fees,
+            transport_cost=data.transport_cost,
+            repair_cost=data.repair_cost,
+            other_costs=data.other_costs,
+            target_profit=data.target_profit,
+            risk_reserve=data.risk_reserve,
+            comparable_count=data.comparable_count,
+            comparable_dispersion_high=data.comparable_dispersion_high,
+            condition_penalty=data.condition_penalty,
+            liquidity_level=data.liquidity_level,
+            competition_level=data.competition_level,
+            source_trust_level=data.source_trust_level,
+            vehicle_identity_quality=data.vehicle_identity_quality,
+            auction_data_quality=data.auction_data_quality,
+            condition_data_quality=data.condition_data_quality,
+            cost_data_quality=data.cost_data_quality
+        )
+
+        result = score_preview(scoring_input)
+
+        cur.execute(
+            """
+            INSERT INTO scores (
+                listing_id,
+                lotrank_score,
+                confidence,
+                lotrank_max,
+                calculated_at
+            )
+            VALUES (
+                %s::uuid,
+                %s,
+                %s,
+                %s,
+                NOW()
+            );
+            """,
+            (
+                str(listing_id),
+                result["lotrank_score"],
+                result["confidence"],
+                result["lotrank_max"]
+            )
+        )
+
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+        return {
+            "status": "ok",
+            "listing_id": str(listing_id),
+            "listing_title": data.title,
+            "score_database_action": "CREATED",
+            "analysis": result
+        }
+
+    except Exception as e:
+
+        if conn:
+            conn.rollback()
+
+        if cur:
+            cur.close()
+
+        if conn:
+            conn.close()
+
+        return {
+            "status": "error",
+            "detail": str(e)
+        }
