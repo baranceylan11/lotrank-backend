@@ -2,9 +2,6 @@ import re
 from playwright.async_api import async_playwright
 
 
-LOT_URL = "https://encheres-domaine.gouv.fr/lot/audiq7-1-doo-1.html"
-
-
 def parse_domaine_text(text):
     clean = text.replace("\xa0", " ")
 
@@ -39,19 +36,35 @@ def parse_domaine_text(text):
         "brand": extract(r"Marque Véhicule\s+([^\n]+)"),
         "model": extract(r"Modèle Véhicule\s+([^\n]+)"),
         "year": int(first_date[-4:]) if first_date else None,
-        "mileage_km": int(mileage.replace(" ", "")) if mileage else None,
-        "fuel_type": extract(r"Energie / carburant\s+([^\n]+)"),
-        "transmission": extract(r"Type de boîte\s+([^\n]+)"),
-        "current_bid": int(bid.replace(" ", "")) if bid else None,
+        "mileage_km": (
+            int(mileage.replace(" ", ""))
+            if mileage
+            else None
+        ),
+        "fuel_type": extract(
+            r"Energie / carburant\s+([^\n]+)"
+        ),
+        "transmission": extract(
+            r"Type de boîte\s+([^\n]+)"
+        ),
+        "current_bid": (
+            int(bid.replace(" ", ""))
+            if bid
+            else None
+        ),
         "auction_fee_pct": 11,
-        "reserved_for_pros": "RÉSERVÉ AUX PROS" in clean.upper(),
+        "reserved_for_pros": (
+            "RÉSERVÉ AUX PROS" in clean.upper()
+        ),
         "registration_certificate": extract(
             r"Certificat d'immatriculation\s+([^\n]+)"
         ),
         "has_key": extract(
             r"Présence d'au moins une clé\s+([^\n]+)"
         ),
-        "location": extract(r"Dépôt\s*:\s*([^\n]+)"),
+        "location": extract(
+            r"Dépôt\s*:\s*([^\n]+)"
+        ),
         "risk_flags": risk_flags,
     }
 
@@ -77,15 +90,7 @@ async def collect_domaine_lot(url):
             timeout=60000,
         )
 
-        try:
-            await page.wait_for_selector(
-                "text=AUDI Q7",
-                timeout=20000
-            )
-        except:
-            pass
-
-        await page.wait_for_timeout(3000)
+        await page.wait_for_timeout(2000)
 
         text = await page.locator("body").inner_text()
 
@@ -103,9 +108,6 @@ async def collect_domaine_lot(url):
             "page_title": await page.title(),
             "parsed": parsed,
             "text_length": len(text),
-            "contains_audi": "AUDI" in text.upper(),
-            "contains_q7": "Q7" in text.upper(),
-            "contains_km": "245200" in text.replace(" ", ""),
             "text_preview": text[:1500],
         }
 
