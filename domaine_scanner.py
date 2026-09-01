@@ -15,8 +15,12 @@ MAX_LOTS_PER_RUN = 20
 
 
 async def discover_vehicle_lots():
+    print("STEP 1 - browser starting")
+
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
+
+        print("STEP 2 - browser started")
 
         context = await browser.new_context(
             user_agent=(
@@ -29,33 +33,57 @@ async def discover_vehicle_lots():
 
         page = await context.new_page()
 
-        await page.goto(
-            LIST_URL,
-            wait_until="domcontentloaded",
-            timeout=60000,
-        )
+        print("STEP 3 - opening list page")
+        print("URL:", LIST_URL)
 
-        await page.wait_for_timeout(3000)
+        try:
+            response = await page.goto(
+                LIST_URL,
+                wait_until="domcontentloaded",
+                timeout=60000,
+            )
 
-        links = await page.locator("a").evaluate_all(
-            """
-            elements => elements
-                .map(a => a.getAttribute('href'))
-                .filter(href => href)
-            """
-        )
+            if response:
+                print("STEP 4 - HTTP status:", response.status)
+            else:
+                print("STEP 4 - no response object")
+
+        except Exception as e:
+            print("PAGE OPEN ERROR:", str(e))
+            await browser.close()
+            return []
+
+        print("STEP 5 - waiting for page content")
+
+        await page.wait_for_timeout(5000)
+
+        print("STEP 6 - reading links")
+
+        try:
+            links = await page.locator("a").evaluate_all(
+                """
+                elements => elements
+                    .map(a => a.getAttribute('href'))
+                    .filter(href => href)
+                """
+            )
+        except Exception as e:
+            print("LINK READ ERROR:", str(e))
+            await browser.close()
+            return []
+
+        print("STEP 7 - total links:", len(links))
 
         lot_urls = []
 
         for href in links:
             full_url = urljoin(LIST_URL, href)
 
-            if (
-                "/lot/" in full_url
-                or "/hermes/biens-mobiliers/vehicules/" in full_url
-            ):
+            if "/lot/" in full_url:
                 if full_url not in lot_urls:
                     lot_urls.append(full_url)
+
+        print("STEP 8 - lot links found:", len(lot_urls))
 
         await browser.close()
 
@@ -88,13 +116,10 @@ async def main():
             print("Mileage:", parsed.get("mileage_km"))
             print("Current bid:", parsed.get("current_bid"))
             print("Location:", parsed.get("location"))
-            print(
-                "Risk flags:",
-                parsed.get("risk_flags")
-            )
+            print("Risk flags:", parsed.get("risk_flags"))
 
         except Exception as e:
-            print("ERROR:", str(e))
+            print("LOT ERROR:", str(e))
 
     print()
     print("=== DOMAINE SCANNER END ===")
