@@ -22,7 +22,7 @@ MAX_MILEAGE = 125000
 
 REQUEST_TIMEOUT = 35
 ZENROWS_TIMEOUT = 150
-MAX_COMPARABLES_PER_SOURCE = 20
+MAX_COMPARABLES_PER_SOURCE = 25
 
 
 @dataclass
@@ -110,10 +110,7 @@ def normalize_fuel(value: str) -> str:
     return normalized
 
 
-def fetch_direct(
-    url: str,
-) -> Optional[requests.Response]:
-
+def fetch_direct(url: str) -> Optional[requests.Response]:
     try:
         return requests.get(
             url,
@@ -121,7 +118,6 @@ def fetch_direct(
             timeout=REQUEST_TIMEOUT,
             allow_redirects=True,
         )
-
     except requests.RequestException as error:
         print(
             "Direct request error:",
@@ -131,13 +127,8 @@ def fetch_direct(
         return None
 
 
-def fetch_with_zenrows(
-    url: str,
-) -> Optional[requests.Response]:
-
-    api_key = os.environ.get(
-        "ZENROWS_API_KEY"
-    )
+def fetch_with_zenrows(url: str) -> Optional[requests.Response]:
+    api_key = os.environ.get("ZENROWS_API_KEY")
 
     if not api_key:
         print(
@@ -160,7 +151,6 @@ def fetch_with_zenrows(
             params=params,
             timeout=ZENROWS_TIMEOUT,
         )
-
     except requests.RequestException as error:
         print(
             "ZenRows request error:",
@@ -170,10 +160,7 @@ def fetch_with_zenrows(
         return None
 
 
-def html_to_text(
-    html: str,
-) -> str:
-
+def html_to_text(html: str) -> str:
     soup = BeautifulSoup(
         html,
         "html.parser",
@@ -187,121 +174,13 @@ def html_to_text(
     )
 
 
-def extract_comparables(
-    source: str,
-    text: str,
+def deduplicate_source_results(
+    items: List[Comparable],
 ) -> List[Comparable]:
-
-    patterns = [
-        re.compile(
-            r"PEUGEOT\s+208"
-            r".{0,260}?"
-            r"\b(20\d{2})\b"
-            r".{0,120}?"
-            r"(\d{1,3}(?:[ .]\d{3})+|\d{4,6})"
-            r"\s*(?:KM|KMS)\b"
-            r".{0,100}?"
-            r"(ESSENCE|DIESEL|HYBRIDE|"
-            r"ELECTRIQUE|ÉLECTRIQUE)"
-            r".{0,120}?"
-            r"(\d{1,3}(?:[ .]\d{3})+|\d{3,6})"
-            r"\s*€",
-            re.IGNORECASE,
-        ),
-        re.compile(
-            r"(\d{1,3}(?:[ .]\d{3})+|\d{3,6})"
-            r"\s*€"
-            r".{0,220}?"
-            r"PEUGEOT\s+208"
-            r".{0,220}?"
-            r"\b(20\d{2})\b"
-            r".{0,140}?"
-            r"(\d{1,3}(?:[ .]\d{3})+|\d{4,6})"
-            r"\s*(?:KM|KMS)\b"
-            r".{0,100}?"
-            r"(ESSENCE|DIESEL|HYBRIDE|"
-            r"ELECTRIQUE|ÉLECTRIQUE)",
-            re.IGNORECASE,
-        ),
-    ]
-
-    results: List[Comparable] = []
-
-    for pattern_index, pattern in enumerate(
-        patterns
-    ):
-        for match in pattern.finditer(text):
-
-            try:
-                if pattern_index == 0:
-                    year = int(
-                        match.group(1)
-                    )
-                    mileage = parse_int(
-                        match.group(2)
-                    )
-                    fuel = normalize_fuel(
-                        match.group(3)
-                    )
-                    price = parse_int(
-                        match.group(4)
-                    )
-
-                else:
-                    price = parse_int(
-                        match.group(1)
-                    )
-                    year = int(
-                        match.group(2)
-                    )
-                    mileage = parse_int(
-                        match.group(3)
-                    )
-                    fuel = normalize_fuel(
-                        match.group(4)
-                    )
-
-            except (
-                ValueError,
-                IndexError,
-            ):
-                continue
-
-            if year != TARGET_YEAR:
-                continue
-
-            if fuel != TARGET_FUEL:
-                continue
-
-            if not (
-                MIN_MILEAGE
-                <= mileage
-                <= MAX_MILEAGE
-            ):
-                continue
-
-            if not (
-                1500
-                <= price
-                <= 100000
-            ):
-                continue
-
-            results.append(
-                Comparable(
-                    source=source,
-                    year=year,
-                    mileage=mileage,
-                    fuel=fuel,
-                    price=price,
-                )
-            )
-
     unique: List[Comparable] = []
     seen = set()
 
-    for item in results:
-
+    for item in items:
         key = (
             item.source,
             item.year,
@@ -314,15 +193,213 @@ def extract_comparables(
             seen.add(key)
             unique.append(item)
 
-    return unique[
-        :MAX_COMPARABLES_PER_SOURCE
+    return unique[:MAX_COMPARABLES_PER_SOURCE]
+
+
+def extract_paruvendu_comparables(
+    text: str,
+) -> List[Comparable]:
+    pattern = re.compile(
+        r"PEUGEOT\s+208"
+        r".{0,280}?"
+        r"\b(20\d{2})\b"
+        r".{0,160}?"
+        r"(\d{1,3}(?:[ .]\d{3})+|\d{4,6})"
+        r"\s*(?:KM|KMS)\b"
+        r".{0,120}?"
+        r"(ESSENCE|DIESEL|HYBRIDE|"
+        r"ELECTRIQUE|ÉLECTRIQUE)"
+        r".{0,160}?"
+        r"(\d{1,3}(?:[ .]\d{3})+|\d{3,6})"
+        r"\s*€",
+        re.IGNORECASE,
+    )
+
+    results: List[Comparable] = []
+
+    for match in pattern.finditer(text):
+        try:
+            year = int(match.group(1))
+            mileage = parse_int(match.group(2))
+            fuel = normalize_fuel(match.group(3))
+            price = parse_int(match.group(4))
+        except (ValueError, IndexError):
+            continue
+
+        if year != TARGET_YEAR:
+            continue
+
+        if fuel != TARGET_FUEL:
+            continue
+
+        if not MIN_MILEAGE <= mileage <= MAX_MILEAGE:
+            continue
+
+        if not 1500 <= price <= 100000:
+            continue
+
+        results.append(
+            Comparable(
+                source="PARUVENDU",
+                year=year,
+                mileage=mileage,
+                fuel=fuel,
+                price=price,
+            )
+        )
+
+    return deduplicate_source_results(results)
+
+
+def extract_autoscout24_comparables(
+    text: str,
+) -> List[Comparable]:
+    pattern = re.compile(
+        r"€\s*"
+        r"(\d{1,3}(?:[ .]\d{3})+|\d{3,6})"
+        r"(?:\^\{?\d+\}?|[^\d]){0,80}?"
+        r"(\d{2})/(20\d{2})"
+        r".{0,80}?"
+        r"(\d{1,3}(?:[ .]\d{3})+|\d{1,6})"
+        r"\s*km"
+        r".{0,60}?"
+        r"(Essence|Diesel|Hybride|"
+        r"Electrique|Électrique)",
+        re.IGNORECASE,
+    )
+
+    results: List[Comparable] = []
+
+    for match in pattern.finditer(text):
+        try:
+            price = parse_int(match.group(1))
+            year = int(match.group(3))
+            mileage = parse_int(match.group(4))
+            fuel = normalize_fuel(match.group(5))
+        except (ValueError, IndexError):
+            continue
+
+        if year != TARGET_YEAR:
+            continue
+
+        if fuel != TARGET_FUEL:
+            continue
+
+        if not MIN_MILEAGE <= mileage <= MAX_MILEAGE:
+            continue
+
+        if not 1500 <= price <= 100000:
+            continue
+
+        results.append(
+            Comparable(
+                source="AUTOSCOUT24",
+                year=year,
+                mileage=mileage,
+                fuel=fuel,
+                price=price,
+            )
+        )
+
+    return deduplicate_source_results(results)
+
+
+def extract_lacentrale_comparables(
+    text: str,
+) -> List[Comparable]:
+    patterns = [
+        re.compile(
+            r"PEUGEOT\s+208"
+            r".{0,320}?"
+            r"\b(20\d{2})\b"
+            r".{0,180}?"
+            r"(\d{1,3}(?:[ .]\d{3})+|\d{4,6})"
+            r"\s*(?:KM|KMS)\b"
+            r".{0,120}?"
+            r"(ESSENCE|DIESEL|HYBRIDE|"
+            r"ELECTRIQUE|ÉLECTRIQUE)"
+            r".{0,180}?"
+            r"(\d{1,3}(?:[ .]\d{3})+|\d{3,6})"
+            r"\s*€",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(\d{1,3}(?:[ .]\d{3})+|\d{3,6})"
+            r"\s*€"
+            r".{0,260}?"
+            r"\b(20\d{2})\b"
+            r".{0,180}?"
+            r"(\d{1,3}(?:[ .]\d{3})+|\d{4,6})"
+            r"\s*(?:KM|KMS)\b"
+            r".{0,120}?"
+            r"(ESSENCE|DIESEL|HYBRIDE|"
+            r"ELECTRIQUE|ÉLECTRIQUE)",
+            re.IGNORECASE,
+        ),
     ]
+
+    results: List[Comparable] = []
+
+    for pattern_index, pattern in enumerate(patterns):
+        for match in pattern.finditer(text):
+            try:
+                if pattern_index == 0:
+                    year = int(match.group(1))
+                    mileage = parse_int(match.group(2))
+                    fuel = normalize_fuel(match.group(3))
+                    price = parse_int(match.group(4))
+                else:
+                    price = parse_int(match.group(1))
+                    year = int(match.group(2))
+                    mileage = parse_int(match.group(3))
+                    fuel = normalize_fuel(match.group(4))
+            except (ValueError, IndexError):
+                continue
+
+            if year != TARGET_YEAR:
+                continue
+
+            if fuel != TARGET_FUEL:
+                continue
+
+            if not MIN_MILEAGE <= mileage <= MAX_MILEAGE:
+                continue
+
+            if not 1500 <= price <= 100000:
+                continue
+
+            results.append(
+                Comparable(
+                    source="LACENTRALE",
+                    year=year,
+                    mileage=mileage,
+                    fuel=fuel,
+                    price=price,
+                )
+            )
+
+    return deduplicate_source_results(results)
+
+
+def extract_comparables(
+    source: str,
+    text: str,
+) -> List[Comparable]:
+    if source == "PARUVENDU":
+        return extract_paruvendu_comparables(text)
+
+    if source == "AUTOSCOUT24":
+        return extract_autoscout24_comparables(text)
+
+    if source == "LACENTRALE":
+        return extract_lacentrale_comparables(text)
+
+    return []
 
 
 def remove_price_outliers(
     items: List[Comparable],
 ) -> List[Comparable]:
-
     if len(items) < 4:
         return items
 
@@ -333,60 +410,52 @@ def remove_price_outliers(
 
     midpoint = len(prices) // 2
 
-    q1 = statistics.median(
-        prices[:midpoint]
-    )
+    lower_half = prices[:midpoint]
+    upper_half = prices[(len(prices) + 1) // 2 :]
 
-    upper_half = prices[
-        (len(prices) + 1) // 2 :
-    ]
+    if not lower_half or not upper_half:
+        return items
 
-    q3 = statistics.median(
-        upper_half
-    )
-
+    q1 = statistics.median(lower_half)
+    q3 = statistics.median(upper_half)
     iqr = q3 - q1
 
     if iqr <= 0:
         return items
 
-    lower_limit = (
-        q1 - 1.5 * iqr
-    )
-
-    upper_limit = (
-        q3 + 1.5 * iqr
-    )
+    lower_limit = q1 - 1.5 * iqr
+    upper_limit = q3 + 1.5 * iqr
 
     return [
         item
         for item in items
-        if (
-            lower_limit
-            <= item.price
-            <= upper_limit
-        )
+        if lower_limit <= item.price <= upper_limit
     ]
 
 
 def calculate_confidence(
     items: List[Comparable],
-    successful_sources: int,
 ) -> int:
-
-    count = len(items)
-
-    if count == 0:
+    if not items:
         return 0
 
+    source_count = len(
+        {
+            item.source
+            for item in items
+        }
+    )
+
+    comparable_count = len(items)
+
     count_score = min(
-        60,
-        count * 6,
+        50,
+        comparable_count * 5,
     )
 
     source_score = min(
         30,
-        successful_sources * 10,
+        source_count * 15,
     )
 
     prices = [
@@ -394,13 +463,10 @@ def calculate_confidence(
         for item in items
     ]
 
-    median_price = statistics.median(
-        prices
-    )
+    median_price = statistics.median(prices)
 
     if median_price <= 0:
         spread_score = 0
-
     else:
         spread = (
             max(prices)
@@ -408,16 +474,13 @@ def calculate_confidence(
         ) / median_price
 
         if spread <= 0.20:
-            spread_score = 10
-
+            spread_score = 20
         elif spread <= 0.35:
-            spread_score = 7
-
+            spread_score = 15
         elif spread <= 0.50:
-            spread_score = 4
-
+            spread_score = 10
         else:
-            spread_score = 1
+            spread_score = 5
 
     return min(
         100,
@@ -432,14 +495,10 @@ def calculate_confidence(
 def process_source(
     source: dict,
 ) -> tuple[List[Comparable], bool]:
-
     name = source["name"]
     url = source["url"]
 
-    print(
-        f"===== SOURCE {name} ====="
-    )
-
+    print(f"===== SOURCE {name} =====")
     print(
         "Host:",
         urlparse(url).netloc,
@@ -453,7 +512,6 @@ def process_source(
             "Direct HTTP status:",
             response.status_code,
         )
-
         print(
             "Direct response bytes:",
             len(response.content),
@@ -466,19 +524,14 @@ def process_source(
 
     if (
         not direct_ok
-        and source.get(
-            "use_zenrows_fallback"
-        )
+        and source.get("use_zenrows_fallback")
     ):
         print(
             "Direct access failed. "
             "Trying ZenRows fallback once."
         )
 
-        response = fetch_with_zenrows(
-            url
-        )
-
+        response = fetch_with_zenrows(url)
         method = "ZENROWS"
 
         if response is not None:
@@ -486,7 +539,6 @@ def process_source(
                 "ZenRows HTTP status:",
                 response.status_code,
             )
-
             print(
                 "ZenRows response bytes:",
                 len(response.content),
@@ -496,21 +548,15 @@ def process_source(
         response is None
         or response.status_code != 200
     ):
-        print(
-            "Source status: UNAVAILABLE"
-        )
-
+        print("Source status: UNAVAILABLE")
         return [], False
 
-    text = html_to_text(
-        response.text
-    )
+    text = html_to_text(response.text)
 
     print(
         "Fetch method:",
         method,
     )
-
     print(
         "Visible text length:",
         len(text),
@@ -527,13 +573,9 @@ def process_source(
     )
 
     if comparables:
+        print("Source status: OK")
 
-        print(
-            "Source status: OK"
-        )
-
-        for item in comparables[:5]:
-
+        for item in comparables[:8]:
             print(
                 f"Comparable: "
                 f"{item.year} | "
@@ -551,78 +593,49 @@ def process_source(
 
     print(
         "Text preview:",
-        text[:700],
+        text[:900],
     )
 
     return [], True
 
 
 def main() -> None:
-
     print(
-        "=== MARKET SOURCE ROUTER V1 START ==="
+        "=== MARKET SOURCE ROUTER V2 START ==="
     )
-
-    print(
-        "Target vehicle: PEUGEOT 208"
-    )
-
-    print(
-        "Target year:",
-        TARGET_YEAR,
-    )
-
-    print(
-        "Target mileage:",
-        TARGET_MILEAGE,
-    )
-
-    print(
-        "Target fuel:",
-        TARGET_FUEL,
-    )
-
+    print("Target vehicle: PEUGEOT 208")
+    print("Target year:", TARGET_YEAR)
+    print("Target mileage:", TARGET_MILEAGE)
+    print("Target fuel:", TARGET_FUEL)
     print(
         "Mileage window:",
         MIN_MILEAGE,
         "-",
         MAX_MILEAGE,
     )
+    print("Database writes: no")
 
-    print(
-        "Database writes: no"
-    )
-
-    all_comparables: List[
-        Comparable
-    ] = []
-
-    successful_sources = 0
+    all_comparables: List[Comparable] = []
+    reached_sources = 0
 
     for source in SOURCES:
-
-        comparables, reached = (
-            process_source(
-                source
-            )
+        comparables, reached = process_source(
+            source
         )
 
         if reached:
-            successful_sources += 1
+            reached_sources += 1
 
         all_comparables.extend(
             comparables
         )
 
-    deduplicated: List[
-        Comparable
-    ] = []
-
+    deduplicated: List[Comparable] = []
     seen = set()
 
     for item in all_comparables:
-
         key = (
+            item.source,
             item.year,
             item.mileage,
             item.fuel,
@@ -631,53 +644,49 @@ def main() -> None:
 
         if key not in seen:
             seen.add(key)
-            deduplicated.append(
-                item
-            )
+            deduplicated.append(item)
 
     filtered = remove_price_outliers(
         deduplicated
     )
 
-    print(
-        "===== ROUTER SUMMARY ====="
+    source_names = sorted(
+        {
+            item.source
+            for item in filtered
+        }
     )
 
+    print("===== ROUTER SUMMARY =====")
     print(
         "Sources reached:",
-        successful_sources,
+        reached_sources,
     )
-
+    print(
+        "Sources with comparables:",
+        len(source_names),
+    )
     print(
         "Raw comparables:",
         len(all_comparables),
     )
-
     print(
         "Unique comparables:",
         len(deduplicated),
     )
-
     print(
-        "Comparables after "
-        "outlier filter:",
+        "Comparables after outlier filter:",
         len(filtered),
     )
 
     if not filtered:
-
-        print(
-            "Status: NO_MARKET_DATA"
-        )
-
+        print("Status: NO_MARKET_DATA")
         print(
             "===== ROUTER SUMMARY END ====="
         )
-
         print(
-            "=== MARKET SOURCE ROUTER V1 END ==="
+            "=== MARKET SOURCE ROUTER V2 END ==="
         )
-
         return
 
     prices = sorted(
@@ -688,9 +697,7 @@ def main() -> None:
     low_price = min(prices)
 
     median_price = int(
-        statistics.median(
-            prices
-        )
+        statistics.median(prices)
     )
 
     high_price = max(prices)
@@ -703,59 +710,40 @@ def main() -> None:
     )
 
     confidence = calculate_confidence(
-        filtered,
-        successful_sources,
+        filtered
     )
 
-    print(
-        "Status: OK"
-    )
-
+    print("Status: OK")
     print(
         "Low market price:",
         low_price,
     )
-
     print(
         "Median market price:",
         median_price,
     )
-
     print(
         "High market price:",
         high_price,
     )
-
     print(
         "Average mileage:",
         average_mileage,
     )
-
     print(
         "Confidence:",
         confidence,
     )
-
-    source_names = sorted(
-        {
-            item.source
-            for item in filtered
-        }
-    )
-
     print(
         "Sources used:",
-        ", ".join(
-            source_names
-        ),
+        ", ".join(source_names),
     )
 
     print(
         "===== ROUTER SUMMARY END ====="
     )
-
     print(
-        "=== MARKET SOURCE ROUTER V1 END ==="
+        "=== MARKET SOURCE ROUTER V2 END ==="
     )
 
 
