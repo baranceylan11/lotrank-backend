@@ -1,5 +1,6 @@
 import asyncio
 import os
+from decimal import Decimal, InvalidOperation
 from urllib.parse import urljoin
 
 import psycopg2
@@ -63,14 +64,21 @@ def normalize_text(value):
     return " ".join(str(value).upper().split())
 
 
+def normalize_price(value):
+    if value is None:
+        return None
+
+    try:
+        return Decimal(str(value)).quantize(Decimal("0.01"))
+    except (InvalidOperation, ValueError, TypeError):
+        return None
+
+
 def matches_strong_mainstream_model(brand, model):
     brand = normalize_text(brand)
     model = normalize_text(model)
 
-    target_models = STRONG_MAINSTREAM_MODELS.get(
-        brand,
-        set(),
-    )
+    target_models = STRONG_MAINSTREAM_MODELS.get(brand, set())
 
     for target in target_models:
         if target in model:
@@ -160,14 +168,10 @@ def calculate_opportunity_score(parsed):
     for risk in risk_flags:
         if risk in SEVERE_RISKS:
             score -= 8
-            reasons.append(
-                f"severe risk {risk} -8"
-            )
+            reasons.append(f"severe risk {risk} -8")
         else:
             score -= 3
-            reasons.append(
-                f"risk {risk} -3"
-            )
+            reasons.append(f"risk {risk} -3")
 
     score = max(
         0,
@@ -198,22 +202,24 @@ def get_today_created_count():
 
     cur = conn.cursor()
 
-    cur.execute(
-        """
-        SELECT COUNT(*)
-        FROM listings
-        WHERE source_id = %s
-          AND created_at >= CURRENT_DATE
-        """,
-        (SOURCE_ID,),
-    )
+    try:
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM listings
+            WHERE jump_url LIKE %s
+              AND created_at >= CURRENT_DATE
+            """,
+            (
+                "https://encheres-domaine.gouv.fr/%",
+            ),
+        )
 
-    count = cur.fetchone()[0]
+        return cur.fetchone()[0]
 
-    cur.close()
-    conn.close()
-
-    return count
+    finally:
+        cur.close()
+        conn.close()
 
 
 async def discover_vehicle_lots():
@@ -311,152 +317,286 @@ def normalize_transmission(value):
     return value
 
 
-def save_listing(url, parsed):
+def get_last_recorded_price(
+    cur,
+    listing_id,
+):
+    cur.execute(
+        """
+        SELECT price
+        FROM price_history
+        WHERE listing_id = %s
+        ORDER BY recorded_at DESC
+        LIMIT 1
+        """,
+        (
+            listing_id,
+        ),
+    )
+
+    row = cur.fetchone()
+
+    if not row:
+        return None
+
+    return normalize_price(
+        row[0]
+    )
+
+
+def save_price_history(
+    cur,
+    listing_id,
+    current_bid,
+):
+    normalized_bid = normalize_price(
+        current_bid
+    )
+
+    if normalized_bid is None:
+        return "NO_PRICE"
+
+    last_price = get_last_recorded_price(
+        cur,
+        listing_id,
+    )
+
+    if last_price == normalized_bid:
+        return "UNCHANGED"
+
+    cur.execute(
+        """
+        INSERT INTO price_history (
+            listing_id,
+            price,
+            recorded_at
+        )
+        VALUES (%s, %s, NOW())
+        """,
+        (
+            listing_id,
+            normalized_bid,
+        ),
+    )
+
+    if last_price is None:
+        print(
+            "PRICE HISTORY - initial price:",
+            normalized_bid,
+        )
+
+        return "INITIAL_PRICE"
+
+    print(
+        "PRICE HISTORY - price changed:",
+        last_price,
+        "->",
+        normalized_bid,
+    )
+
+    return "PRICE_CHANGED"
+
+
+def save_listing(
+    url,
+    parsed,
+):
     conn = psycopg2.connect(
         os.environ["DATABASE_URL"]
     )
 
     cur = conn.cursor()
 
-    cur.execute(
-        """
-        SELECT id
-        FROM listings
-        WHERE jump_url = %s
-        LIMIT 1
-        """,
-        (url,),
-    )
-
-    existing = cur.fetchone()
-
-    if existing:
-        listing_id = str(
-            existing[0]
-        )
-
-        print(
-            "SKIPPED - already exists:",
-            listing_id,
-        )
-
-        cur.close()
-        conn.close()
-
-        return {
-            "action": "SKIPPED",
-            "listing_id": listing_id,
-        }
-
-    brand = parsed.get("brand")
-    model = parsed.get("model")
-
-    title = " ".join(
-        value
-        for value in [
-            brand,
-            model,
-        ]
-        if value
-    )
-
-    fuel_type = normalize_fuel(
-        parsed.get("fuel_type")
-    )
-
-    transmission = normalize_transmission(
-        parsed.get("transmission")
-    )
-
-    cur.execute(
-        """
-        INSERT INTO listings (
-            source_id,
-            raw_listing_id,
-            title,
-            category,
-            brand,
-            model,
-            year,
-            mileage_km,
-            fuel_type,
-            transmission,
-            location,
-            status,
-            jump_url
-        )
-        VALUES (
-            %s, %s, %s, %s, %s, %s, %s,
-            %s, %s, %s, %s, %s, %s
-        )
-        RETURNING id
-        """,
-        (
-            SOURCE_ID,
-            None,
-            title or "Domaine Vehicle",
-            "car",
-            brand,
-            model,
-            parsed.get("year"),
-            parsed.get("mileage_km"),
-            fuel_type,
-            transmission,
-            parsed.get("location"),
-            "active",
-            url,
-        ),
-    )
-
-    listing_id = str(
-        cur.fetchone()[0]
-    )
-
-    risk_flags = parsed.get(
-        "risk_flags",
-        [],
-    ) or []
-
-    saved_risks = 0
-
-    for risk in risk_flags:
+    try:
         cur.execute(
             """
-            INSERT INTO risk_flags (
-                listing_id,
-                flag_type,
-                description
-            )
-            VALUES (%s, %s, %s)
+            SELECT id
+            FROM listings
+            WHERE jump_url = %s
+            LIMIT 1
             """,
             (
-                listing_id,
-                risk,
-                risk,
+                url,
             ),
         )
 
-        saved_risks += 1
+        existing = cur.fetchone()
 
-    conn.commit()
-    cur.close()
-    conn.close()
+        if existing:
+            listing_id = str(
+                existing[0]
+            )
 
-    print(
-        "CREATED listing:",
-        listing_id,
-    )
+            price_action = save_price_history(
+                cur,
+                listing_id,
+                parsed.get("current_bid"),
+            )
 
-    print(
-        "Risk flags saved:",
-        saved_risks,
-    )
+            conn.commit()
 
-    return {
-        "action": "CREATED",
-        "listing_id": listing_id,
-        "risk_flags_saved": saved_risks,
-    }
+            if price_action == "PRICE_CHANGED":
+                print(
+                    "UPDATED - price history saved:",
+                    listing_id,
+                )
+
+                return {
+                    "action": "PRICE_UPDATED",
+                    "listing_id": listing_id,
+                    "price_action": price_action,
+                }
+
+            if price_action == "INITIAL_PRICE":
+                print(
+                    "UPDATED - initial price history saved:",
+                    listing_id,
+                )
+
+                return {
+                    "action": "PRICE_INITIALIZED",
+                    "listing_id": listing_id,
+                    "price_action": price_action,
+                }
+
+            print(
+                "SKIPPED - already exists:",
+                listing_id,
+            )
+
+            return {
+                "action": "SKIPPED",
+                "listing_id": listing_id,
+                "price_action": price_action,
+            }
+
+        brand = parsed.get(
+            "brand"
+        )
+
+        model = parsed.get(
+            "model"
+        )
+
+        title = " ".join(
+            value
+            for value in [
+                brand,
+                model,
+            ]
+            if value
+        )
+
+        fuel_type = normalize_fuel(
+            parsed.get("fuel_type")
+        )
+
+        transmission = normalize_transmission(
+            parsed.get("transmission")
+        )
+
+        cur.execute(
+            """
+            INSERT INTO listings (
+                source_id,
+                raw_listing_id,
+                title,
+                category,
+                brand,
+                model,
+                year,
+                mileage_km,
+                fuel_type,
+                transmission,
+                location,
+                status,
+                jump_url
+            )
+            VALUES (
+                %s, %s, %s, %s, %s, %s, %s,
+                %s, %s, %s, %s, %s, %s
+            )
+            RETURNING id
+            """,
+            (
+                SOURCE_ID,
+                None,
+                title or "Domaine Vehicle",
+                "car",
+                brand,
+                model,
+                parsed.get("year"),
+                parsed.get("mileage_km"),
+                fuel_type,
+                transmission,
+                parsed.get("location"),
+                "active",
+                url,
+            ),
+        )
+
+        listing_id = str(
+            cur.fetchone()[0]
+        )
+
+        risk_flags = parsed.get(
+            "risk_flags",
+            [],
+        ) or []
+
+        saved_risks = 0
+
+        for risk in risk_flags:
+            cur.execute(
+                """
+                INSERT INTO risk_flags (
+                    listing_id,
+                    flag_type,
+                    description
+                )
+                VALUES (%s, %s, %s)
+                """,
+                (
+                    listing_id,
+                    risk,
+                    risk,
+                ),
+            )
+
+            saved_risks += 1
+
+        price_action = save_price_history(
+            cur,
+            listing_id,
+            parsed.get("current_bid"),
+        )
+
+        conn.commit()
+
+        print(
+            "CREATED listing:",
+            listing_id,
+        )
+
+        print(
+            "Risk flags saved:",
+            saved_risks,
+        )
+
+        return {
+            "action": "CREATED",
+            "listing_id": listing_id,
+            "risk_flags_saved": saved_risks,
+            "price_action": price_action,
+        }
+
+    except Exception:
+        conn.rollback()
+        raise
+
+    finally:
+        cur.close()
+        conn.close()
 
 
 async def main():
@@ -490,6 +630,8 @@ async def main():
 
     created = 0
     skipped = 0
+    price_updates = 0
+    price_initialized = 0
     high_priority = 0
     watchlist = 0
     filtered = 0
@@ -600,10 +742,11 @@ async def main():
                 parsed,
             )
 
-            if (
-                database_result["action"]
-                == "CREATED"
-            ):
+            action = database_result[
+                "action"
+            ]
+
+            if action == "CREATED":
                 created += 1
                 remaining_daily_slots -= 1
 
@@ -617,6 +760,12 @@ async def main():
                         "DAILY LIMIT REACHED - stopping scan"
                     )
                     break
+
+            elif action == "PRICE_UPDATED":
+                price_updates += 1
+
+            elif action == "PRICE_INITIALIZED":
+                price_initialized += 1
 
             else:
                 skipped += 1
@@ -642,6 +791,16 @@ async def main():
     print(
         "Skipped:",
         skipped,
+    )
+
+    print(
+        "Price updates:",
+        price_updates,
+    )
+
+    print(
+        "Price initialized:",
+        price_initialized,
     )
 
     print(
