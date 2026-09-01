@@ -1,15 +1,16 @@
 import math
 import re
 import statistics
+from collections import Counter
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 import requests
 from bs4 import BeautifulSoup
 
 
-VERSION = "MARKET SOURCE ROUTER V4"
+VERSION = "MARKET SOURCE ROUTER V5"
 
 TARGET_BRAND = "PEUGEOT"
 TARGET_MODEL = "208"
@@ -26,11 +27,11 @@ REQUEST_TIMEOUT = 35
 MAX_COMPARABLES_PER_SOURCE = 25
 
 AUCTION_FEE_RATE = 0.11
-TRANSPORT_COST = 300
-REPAIR_COST = 500
-OTHER_COST = 200
-TARGET_PROFIT = 1500
-RISK_RESERVE = 500
+BASE_TRANSPORT_COST = 300
+BASE_OTHER_COST = 200
+
+DUPLICATE_MILEAGE_TOLERANCE = 500
+DUPLICATE_PRICE_TOLERANCE = 150
 
 
 @dataclass(frozen=True)
@@ -331,40 +332,176 @@ def extract_comparables(
     return []
 
 
-def remove_price_outliers(
+def remove_cross_source_duplicates(
     items: List[Comparable],
-) -> List[Comparable]:
-    if len(items) < 4:
-        return items
+) -> Tuple[List[Comparable], int]:
+    kept: List[Comparable] = []
+    removed = 0
 
-    prices = sorted(
-        item.price
-        for item in items
+    ordered = sorted(
+        items,
+        key=lambda item: (
+            abs(item.mileage - TARGET_MILEAGE),
+            item.price,
+        ),
     )
 
-    midpoint = len(prices) // 2
+    for candidate in ordered:
+        duplicate_found = False
 
-    lower_half = prices[:midpoint]
-    upper_half = prices[(len(prices) + 1) // 2:]
+        for existing in kept:
+            if candidate.source == existing.source:
+                continue
 
-    if not lower_half or not upper_half:
-        return items
+            same_identity = (
+                candidate.year == existing.year
+                and candidate.fuel == existing.fuel
+            )
+
+            close_mileage = (
+                abs(candidate.mileage - existing.mileage)
+                <= DUPLICATE_MILEAGE_TOLERANCE
+            )
+
+            close_price = (
+                abs(candidate.price - existing.price)
+                <= DUPLICATE_PRICE_TOLERANCE
+            )
+
+            if same_identity and close_mileage and close_price:
+                duplicate_found = True
+                removed += 1
+                break
+
+        if not duplicate_found:
+            kept.append(candidate)
+
+    return kept, removed
+
+
+def remove_price_outliers(
+    items: List[Comparable],
+) -> Tuple[List[Comparable], int]:
+    if len(items) < 5:
+        return items, 0
+
+    prices = [
+        item.price
+        for item in items
+    ]
+
+    median_price = statistics.median(prices)
+
+    absolute_deviations = [
+        abs(price - median_price)
+        for price in prices
+    ]
+
+    mad = statistics.median(
+        absolute_deviations
+    )
+
+    mad_filtered = items
+
+    if mad > 0:
+        mad_limit = 3.5
+
+        mad_filtered = [
+            item
+            for item in items
+            if (
+                0.6745
+                * abs(item.price - median_price)
+                / mad
+            )
+            <= mad_limit
+        ]
+
+    if len(mad_filtered) < 5:
+        removed = len(items) - len(mad_filtered)
+        return mad_filtered, removed
+
+    filtered_prices = sorted(
+        item.price
+        for item in mad_filtered
+    )
+
+    midpoint = len(filtered_prices) // 2
+
+    lower_half = filtered_prices[:midpoint]
+    upper_half = filtered_prices[(len(filtered_prices) + 1) // 2:]
 
     q1 = statistics.median(lower_half)
     q3 = statistics.median(upper_half)
     iqr = q3 - q1
 
     if iqr <= 0:
-        return items
+        removed = len(items) - len(mad_filtered)
+        return mad_filtered, removed
 
     lower_limit = q1 - 1.5 * iqr
     upper_limit = q3 + 1.5 * iqr
 
-    return [
+    final_items = [
         item
-        for item in items
+        for item in mad_filtered
         if lower_limit <= item.price <= upper_limit
     ]
+
+    removed = len(items) - len(final_items)
+
+    return final_items, removed
+
+
+def calculate_equal_source_weighted_median(
+    items: List[Comparable],
+) -> int:
+    if not items:
+        return 0
+
+    counts = Counter(
+        item.source
+        for item in items
+    )
+
+    weighted_items = []
+
+    for item in items:
+        source_count = counts[item.source]
+
+        if source_count <= 0:
+            continue
+
+        weight = 1.0 / source_count
+
+        weighted_items.append(
+            (
+                item.price,
+                weight,
+            )
+        )
+
+    weighted_items.sort(
+        key=lambda entry: entry[0]
+    )
+
+    total_weight = sum(
+        weight
+        for _, weight in weighted_items
+    )
+
+    halfway = total_weight / 2
+    cumulative = 0.0
+
+    for price, weight in weighted_items:
+        cumulative += weight
+
+        if cumulative >= halfway:
+            return int(price)
+
+    return int(
+        weighted_items[-1][0]
+    )
 
 
 def calculate_confidence(
@@ -432,15 +569,94 @@ def calculate_confidence(
     )
 
 
+def calculate_dynamic_costs(
+    safe_sale_value: int,
+    confidence: int,
+    items: List[Comparable],
+) -> Dict[str, int]:
+    prices = [
+        item.price
+        for item in items
+    ]
+
+    if prices and safe_sale_value > 0:
+        market_spread = (
+            max(prices)
+            - min(prices)
+        ) / safe_sale_value
+    else:
+        market_spread = 1.0
+
+    repair_reserve = 350
+
+    if TARGET_MILEAGE >= 100000:
+        repair_reserve += 150
+
+    if TARGET_MILEAGE >= 120000:
+        repair_reserve += 200
+
+    if market_spread > 0.50:
+        repair_reserve += 150
+
+    risk_reserve = 300
+
+    if confidence < 70:
+        risk_reserve += 500
+
+    elif confidence < 80:
+        risk_reserve += 350
+
+    elif confidence < 90:
+        risk_reserve += 150
+
+    if market_spread > 0.50:
+        risk_reserve += 200
+
+    elif market_spread > 0.35:
+        risk_reserve += 100
+
+    if safe_sale_value < 7000:
+        profit_rate = 0.16
+
+    elif safe_sale_value < 15000:
+        profit_rate = 0.18
+
+    else:
+        profit_rate = 0.20
+
+    target_profit = max(
+        1200,
+        round(safe_sale_value * profit_rate),
+    )
+
+    transport_cost = BASE_TRANSPORT_COST
+    other_cost = BASE_OTHER_COST
+
+    return {
+        "transport_cost": transport_cost,
+        "repair_reserve": repair_reserve,
+        "other_cost": other_cost,
+        "target_profit": target_profit,
+        "risk_reserve": risk_reserve,
+        "profit_rate_percent": round(
+            profit_rate * 100
+        ),
+        "market_spread_percent": round(
+            market_spread * 100
+        ),
+    }
+
+
 def calculate_lotrank_max(
     safe_sale_value: int,
+    costs: Dict[str, int],
 ) -> int:
     fixed_costs = (
-        TRANSPORT_COST
-        + REPAIR_COST
-        + OTHER_COST
-        + TARGET_PROFIT
-        + RISK_RESERVE
+        costs["transport_cost"]
+        + costs["repair_reserve"]
+        + costs["other_cost"]
+        + costs["target_profit"]
+        + costs["risk_reserve"]
     )
 
     available_for_bid_and_fee = (
@@ -464,6 +680,7 @@ def calculate_lotrank_max(
 
 def calculate_acquisition_cost(
     bid: int,
+    costs: Dict[str, int],
 ) -> int:
     auction_fee = round(
         bid * AUCTION_FEE_RATE
@@ -472,9 +689,9 @@ def calculate_acquisition_cost(
     return (
         bid
         + auction_fee
-        + TRANSPORT_COST
-        + REPAIR_COST
-        + OTHER_COST
+        + costs["transport_cost"]
+        + costs["repair_reserve"]
+        + costs["other_cost"]
     )
 
 
@@ -505,7 +722,7 @@ def calculate_bid_status(
 
 def process_source(
     source: dict,
-) -> tuple[List[Comparable], bool]:
+) -> Tuple[List[Comparable], bool]:
     name = source["name"]
     url = source["url"]
 
@@ -643,10 +860,7 @@ def main() -> None:
         "Paid proxy fallback: disabled"
     )
 
-    all_comparables: List[
-        Comparable
-    ] = []
-
+    all_comparables: List[Comparable] = []
     reached_sources = 0
 
     for source in SOURCES:
@@ -661,11 +875,8 @@ def main() -> None:
             comparables
         )
 
-    deduplicated: List[
-        Comparable
-    ] = []
-
-    seen = set()
+    exact_unique: List[Comparable] = []
+    exact_seen = set()
 
     for item in all_comparables:
         key = (
@@ -676,16 +887,22 @@ def main() -> None:
             item.price,
         )
 
-        if key in seen:
+        if key in exact_seen:
             continue
 
-        seen.add(key)
-        deduplicated.append(
-            item
-        )
+        exact_seen.add(key)
+        exact_unique.append(item)
 
-    filtered = remove_price_outliers(
-        deduplicated
+    cross_source_unique, duplicate_removed = (
+        remove_cross_source_duplicates(
+            exact_unique
+        )
+    )
+
+    filtered, outliers_removed = (
+        remove_price_outliers(
+            cross_source_unique
+        )
     )
 
     source_names = sorted(
@@ -693,6 +910,47 @@ def main() -> None:
             item.source
             for item in filtered
         }
+    )
+
+    print(
+        "===== DUPLICATE FILTER ====="
+    )
+
+    print(
+        "Exact unique comparables:",
+        len(exact_unique),
+    )
+
+    print(
+        "Cross-source duplicates removed:",
+        duplicate_removed,
+    )
+
+    print(
+        "Comparables after duplicate filter:",
+        len(cross_source_unique),
+    )
+
+    print(
+        "===== DUPLICATE FILTER END ====="
+    )
+
+    print(
+        "===== OUTLIER FILTER ====="
+    )
+
+    print(
+        "Outliers removed:",
+        outliers_removed,
+    )
+
+    print(
+        "Comparables after outlier filter:",
+        len(filtered),
+    )
+
+    print(
+        "===== OUTLIER FILTER END ====="
     )
 
     print(
@@ -712,16 +970,6 @@ def main() -> None:
     print(
         "Raw comparables:",
         len(all_comparables),
-    )
-
-    print(
-        "Unique comparables:",
-        len(deduplicated),
-    )
-
-    print(
-        "Comparables after outlier filter:",
-        len(filtered),
     )
 
     if not filtered:
@@ -746,9 +994,13 @@ def main() -> None:
 
     low_price = min(prices)
 
-    median_price = int(
-        statistics.median(
-            prices
+    raw_median_price = int(
+        statistics.median(prices)
+    )
+
+    balanced_median_price = (
+        calculate_equal_source_weighted_median(
+            filtered
         )
     )
 
@@ -775,8 +1027,13 @@ def main() -> None:
     )
 
     print(
-        "Median market price:",
-        median_price,
+        "Raw median market price:",
+        raw_median_price,
+    )
+
+    print(
+        "Balanced median market price:",
+        balanced_median_price,
     )
 
     print(
@@ -796,19 +1053,80 @@ def main() -> None:
 
     print(
         "Sources used:",
-        ", ".join(
-            source_names
-        ),
+        ", ".join(source_names),
+    )
+
+    print(
+        "Source weighting: EQUAL_TOTAL_WEIGHT"
     )
 
     print(
         "===== ROUTER SUMMARY END ====="
     )
 
-    safe_sale_value = median_price
+    safe_sale_value = (
+        balanced_median_price
+    )
+
+    dynamic_costs = (
+        calculate_dynamic_costs(
+            safe_sale_value,
+            confidence,
+            filtered,
+        )
+    )
+
+    print(
+        "===== DYNAMIC COST ENGINE ====="
+    )
+
+    print(
+        "Safe sale value:",
+        safe_sale_value,
+    )
+
+    print(
+        "Market spread:",
+        f"{dynamic_costs['market_spread_percent']}%",
+    )
+
+    print(
+        "Transport cost:",
+        dynamic_costs["transport_cost"],
+    )
+
+    print(
+        "Repair reserve:",
+        dynamic_costs["repair_reserve"],
+    )
+
+    print(
+        "Other costs:",
+        dynamic_costs["other_cost"],
+    )
+
+    print(
+        "Target profit rate:",
+        f"{dynamic_costs['profit_rate_percent']}%",
+    )
+
+    print(
+        "Target profit:",
+        dynamic_costs["target_profit"],
+    )
+
+    print(
+        "Risk reserve:",
+        dynamic_costs["risk_reserve"],
+    )
+
+    print(
+        "===== DYNAMIC COST ENGINE END ====="
+    )
 
     lotrank_max = calculate_lotrank_max(
-        safe_sale_value
+        safe_sale_value,
+        dynamic_costs,
     )
 
     auction_fee_at_current_bid = round(
@@ -818,7 +1136,8 @@ def main() -> None:
 
     acquisition_cost = (
         calculate_acquisition_cost(
-            CURRENT_AUCTION_BID
+            CURRENT_AUCTION_BID,
+            dynamic_costs,
         )
     )
 
@@ -842,11 +1161,6 @@ def main() -> None:
     )
 
     print(
-        "Safe sale value:",
-        safe_sale_value,
-    )
-
-    print(
         "Auction fee rate:",
         f"{AUCTION_FEE_RATE * 100:.1f}%",
     )
@@ -854,31 +1168,6 @@ def main() -> None:
     print(
         "Auction fee at current bid:",
         auction_fee_at_current_bid,
-    )
-
-    print(
-        "Transport cost:",
-        TRANSPORT_COST,
-    )
-
-    print(
-        "Repair reserve:",
-        REPAIR_COST,
-    )
-
-    print(
-        "Other costs:",
-        OTHER_COST,
-    )
-
-    print(
-        "Target profit:",
-        TARGET_PROFIT,
-    )
-
-    print(
-        "Risk reserve:",
-        RISK_RESERVE,
     )
 
     print(
