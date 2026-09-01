@@ -1,172 +1,202 @@
-import json
+import re
 import requests
+from bs4 import BeautifulSoup
 
 
-API_URL = "https://recherche.lacentrale.fr/v3/search"
-
-TEST_PARAMS = {
-    "makesModelsCommercialNames": "PEUGEOT:208",
-    "page": "0",
-    "pageSize": "5",
-    "yearMin": "2018",
-    "yearMax": "2020",
-    "mileageMin": "65000",
-    "mileageMax": "120000",
-}
+TEST_URL = "https://www.lacentrale.fr/occasion-voiture-modele-peugeot-208.html"
 
 HEADERS = {
-    "Accept": "application/json, text/plain, */*",
-    "Origin": "https://www.lacentrale.fr",
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;q=0.9,"
+        "image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
     "Referer": "https://www.lacentrale.fr/",
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/120.0.0.0 Safari/537.36"
+        "Chrome/124.0.0.0 Safari/537.36"
     ),
-    "X-Client-Source": "lc:recherche:front",
 }
 
 
-def safe_preview(text: str, limit: int = 1000) -> str:
-    if not text:
-        return "<empty>"
-
-    return " ".join(text.split())[:limit]
+def clean_text(value: str) -> str:
+    value = value.replace("\u00a0", " ").replace("\u202f", " ")
+    return re.sub(r"\s+", " ", value).strip()
 
 
-def run_test() -> None:
-    print("=== LACENTRALE SEARCH API TEST START ===")
-    print("Endpoint:", API_URL)
-    print("API key configured: no")
-    print("Writing to database: no")
+def extract_vehicle_candidates(text: str):
+    pattern = re.compile(
+        r"\b(20(?:0\d|1\d|2\d))\b"
+        r".{0,80}?"
+        r"\b(\d{1,3}(?:[ .]\d{3})+|\d{4,6})\s*km\b"
+        r".{0,80}?"
+        r"\b(Essence|Diesel|Hybride(?:s)?|Électrique|Electrique)\b"
+        r".{0,80}?"
+        r"\b(\d{1,3}(?:[ .]\d{3})+|\d{3,6})\s*€",
+        re.IGNORECASE,
+    )
+
+    results = []
+
+    for match in pattern.finditer(text):
+        year = int(match.group(1))
+        mileage = int(re.sub(r"\D", "", match.group(2)))
+        fuel = match.group(3).upper()
+        price = int(re.sub(r"\D", "", match.group(4)))
+
+        if not (2000 <= year <= 2030):
+            continue
+
+        if not (0 <= mileage <= 1_000_000):
+            continue
+
+        if not (500 <= price <= 500_000):
+            continue
+
+        results.append(
+            {
+                "year": year,
+                "mileage": mileage,
+                "fuel": fuel,
+                "price": price,
+            }
+        )
+
+    return results
+
+
+def main():
+    print("=== LACENTRALE PUBLIC HTML TEST START ===")
+    print("URL:", TEST_URL)
+    print("Database writes: no")
+    print("API key used: no")
 
     try:
         response = requests.get(
-            API_URL,
-            params=TEST_PARAMS,
+            TEST_URL,
             headers=HEADERS,
             timeout=30,
-            allow_redirects=False,
+            allow_redirects=True,
         )
 
     except requests.RequestException as error:
-        print("Connection result: FAILED")
+        print("Status: REQUEST_FAILED")
         print("Error type:", type(error).__name__)
         print("Error:", str(error))
-        print("=== LACENTRALE SEARCH API TEST END ===")
+        print("=== LACENTRALE PUBLIC HTML TEST END ===")
         return
 
-    print("Connection result: REACHED")
     print("HTTP status:", response.status_code)
-    print(
-        "Content-Type:",
-        response.headers.get("content-type"),
+    print("Final URL:", response.url)
+    print("Content-Type:", response.headers.get("content-type"))
+    print("Response bytes:", len(response.content))
+
+    soup = BeautifulSoup(response.text, "html.parser")
+
+    if soup.title:
+        page_title = clean_text(
+            soup.title.get_text(" ", strip=True)
+        )
+    else:
+        page_title = ""
+
+    page_text = clean_text(
+        soup.get_text(" ", strip=True)
     )
-    print(
-        "Response bytes:",
-        len(response.content),
+
+    print("Page title:", page_title[:200])
+    print("Visible text length:", len(page_text))
+
+    lower_text = page_text.lower()
+
+    block_terms = (
+        "access denied",
+        "forbidden",
+        "captcha",
+        "verify you are human",
+        "vérifiez que vous êtes humain",
     )
 
-    if response.is_redirect:
-        print(
-            "Redirect location:",
-            response.headers.get("location"),
+    blocked = any(
+        term in lower_text
+        for term in block_terms
+    )
+
+    vehicle_candidates = extract_vehicle_candidates(
+        page_text
+    )
+
+    price_count = len(
+        re.findall(
+            r"\b\d{1,3}(?:[ .]\d{3})+\s*€",
+            page_text,
         )
+    )
 
-    try:
-        payload = response.json()
-
-    except (ValueError, json.JSONDecodeError):
-        print("JSON response: no")
-        print(
-            "Response preview:",
-            safe_preview(response.text),
+    mileage_count = len(
+        re.findall(
+            r"\b\d{1,3}(?:[ .]\d{3})+\s*km\b",
+            page_text,
+            re.IGNORECASE,
         )
-        print(
-            "=== LACENTRALE SEARCH API TEST END ==="
-        )
-        return
+    )
 
-    print("JSON response: yes")
+    print(
+        "Blocked page detected:",
+        "yes" if blocked else "no",
+    )
 
-    if isinstance(payload, dict):
-        print(
-            "Top-level keys:",
-            sorted(payload.keys()),
-        )
+    print(
+        "Price patterns found:",
+        price_count,
+    )
 
-        hits = payload.get("hits")
+    print(
+        "Mileage patterns found:",
+        mileage_count,
+    )
 
-        if isinstance(hits, list):
+    print(
+        "Vehicle candidates parsed:",
+        len(vehicle_candidates),
+    )
+
+    if response.status_code == 200 and vehicle_candidates:
+        print("Status: OK")
+
+        for index, vehicle in enumerate(
+            vehicle_candidates[:10],
+            start=1,
+        ):
             print(
-                "Hits:",
-                len(hits),
+                f"Vehicle {index}: "
+                f"year={vehicle['year']} "
+                f"mileage={vehicle['mileage']} "
+                f"fuel={vehicle['fuel']} "
+                f"price={vehicle['price']}"
             )
 
-            if hits:
-                first = hits[0]
-
-                print(
-                    "First hit type:",
-                    type(first).__name__,
-                )
-
-                if isinstance(first, dict):
-                    print(
-                        "First hit keys:",
-                        sorted(first.keys()),
-                    )
-
-                    item = first.get("item")
-
-                    if isinstance(item, dict):
-                        print(
-                            "First item keys:",
-                            sorted(item.keys()),
-                        )
-
-                        vehicle = item.get(
-                            "vehicle"
-                        )
-
-                        if isinstance(
-                            vehicle,
-                            dict,
-                        ):
-                            print(
-                                "First vehicle keys:",
-                                sorted(
-                                    vehicle.keys()
-                                ),
-                            )
-
-        else:
-            print(
-                "Hits field: unavailable"
-            )
-
-        error_value = (
-            payload.get("error")
-            or payload.get("message")
-            or payload.get("detail")
+    elif response.status_code == 200 and not blocked:
+        print("Status: PAGE_REACHED_NO_CANDIDATES")
+        print(
+            "Text preview:",
+            page_text[:1200],
         )
-
-        if error_value:
-            print(
-                "API message:",
-                str(error_value)[:500],
-            )
 
     else:
+        print("Status: BLOCKED_OR_UNAVAILABLE")
         print(
-            "JSON root type:",
-            type(payload).__name__,
+            "Text preview:",
+            page_text[:1200],
         )
 
     print(
-        "=== LACENTRALE SEARCH API TEST END ==="
+        "=== LACENTRALE PUBLIC HTML TEST END ==="
     )
 
 
 if __name__ == "__main__":
-    run_test()
+    main()
