@@ -1,35 +1,35 @@
-import requests
-from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright
 
 
 LOT_URL = "https://encheres-domaine.gouv.fr/lot/audiq7-1-doo-1.html"
 
 
-def collect_domaine_lot(url):
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
+async def collect_domaine_lot(url):
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
 
-    response = requests.get(url, headers=headers, timeout=20)
-    response.raise_for_status()
+        page = await browser.new_page(
+            user_agent=(
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/120.0.0.0 Safari/537.36"
+            )
+        )
 
-    soup = BeautifulSoup(response.text, "html.parser")
+        await page.goto(url, wait_until="networkidle", timeout=60000)
 
-    text = soup.get_text(" ", strip=True)
+        text = await page.locator("body").inner_text()
+        title = await page.title()
 
-    result = {
-        "source": "Encheres du Domaine",
-        "url": url,
-        "http_status": response.status_code,
-        "page_title": soup.title.get_text(strip=True) if soup.title else None,
-        "contains_audi": "AUDI" in text.upper(),
-        "contains_q7": "Q7" in text.upper(),
-        "contains_km": "245200" in text.replace(" ", ""),
-    }
+        result = {
+            "source": "Encheres du Domaine",
+            "url": url,
+            "page_title": title,
+            "contains_audi": "AUDI" in text.upper(),
+            "contains_q7": "Q7" in text.upper(),
+            "contains_km": "245200" in text.replace(" ", ""),
+            "text_preview": text[:2000]
+        }
 
-    return result
-
-
-if __name__ == "__main__":
-    data = collect_domaine_lot(LOT_URL)
-    print(data)
+        await browser.close()
+        return result
