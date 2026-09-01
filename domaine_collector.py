@@ -9,8 +9,15 @@ def parse_domaine_text(text):
         match = re.search(pattern, clean, re.IGNORECASE)
         return match.group(1).strip() if match else None
 
-    bid = extract(r"Enchère en cours\s+(\d[\d ]*)\s*€")
+    # Fiyat için birkaç olası Domaine yazımını kontrol ediyoruz.
+    bid = (
+        extract(r"Enchère en cours\s+(\d[\d ]*)\s*€")
+        or extract(r"Enchère actuelle\s+(\d[\d ]*)\s*€")
+        or extract(r"Prix actuel\s+(\d[\d ]*)\s*€")
+    )
+
     mileage = extract(r"Kilométrage\s+(\d[\d ]*)")
+
     first_date = extract(
         r"Date de 1ère mise en circulation\s+(\d{2}/\d{2}/\d{4})"
     )
@@ -54,11 +61,6 @@ def parse_domaine_text(text):
 
 
 async def wait_for_vehicle_data(page):
-    """
-    Sabit uzun bekleme yerine, ilan bilgileri gelene kadar akıllı bekleme.
-    Veri hızlı gelirse hemen devam eder; yavaşsa en fazla yaklaşık 12 sn bekler.
-    """
-
     try:
         await page.wait_for_function(
             """
@@ -75,8 +77,27 @@ async def wait_for_vehicle_data(page):
             timeout=12000,
         )
     except:
-        # Sayfa farklı yapıdaysa kısa bir ek bekleme ile yine okumayı dene.
         await page.wait_for_timeout(1500)
+
+
+async def wait_for_bid_data(page):
+    try:
+        await page.wait_for_function(
+            """
+            () => {
+                const text = document.body?.innerText || "";
+                return (
+                    text.includes("Enchère en cours") ||
+                    text.includes("Enchère actuelle") ||
+                    text.includes("Prix actuel")
+                );
+            }
+            """,
+            timeout=7000,
+        )
+    except:
+        # Bazı ilanlarda aktif teklif olmayabilir.
+        pass
 
 
 async def collect_domaine_lot(url):
@@ -101,7 +122,11 @@ async def collect_domaine_lot(url):
                 timeout=60000,
             )
 
+            # Önce araç bilgilerini bekle.
             await wait_for_vehicle_data(page)
+
+            # Sonra fiyat alanının yüklenmesini bekle.
+            await wait_for_bid_data(page)
 
             text = await page.locator("body").inner_text()
 
@@ -112,8 +137,14 @@ async def collect_domaine_lot(url):
 
             parsed = parse_domaine_text(text)
 
-            # İlk okumada temel bilgiler gelmediyse bir kez daha kısa bekleyip oku.
+            # Araç bilgileri eksikse bir kez daha dene.
             if not parsed.get("brand") and not parsed.get("model"):
+                await page.wait_for_timeout(2500)
+                text = await page.locator("body").inner_text()
+                parsed = parse_domaine_text(text)
+
+            # Araç var ama fiyat henüz gelmediyse son bir kısa deneme.
+            if parsed.get("brand") and parsed.get("current_bid") is None:
                 await page.wait_for_timeout(2500)
                 text = await page.locator("body").inner_text()
                 parsed = parse_domaine_text(text)
