@@ -1,3 +1,4 @@
+import math
 import re
 import statistics
 from dataclasses import dataclass
@@ -8,7 +9,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-VERSION = "MARKET SOURCE ROUTER V3"
+VERSION = "MARKET SOURCE ROUTER V4"
 
 TARGET_BRAND = "PEUGEOT"
 TARGET_MODEL = "208"
@@ -16,11 +17,20 @@ TARGET_YEAR = 2019
 TARGET_MILEAGE = 92910
 TARGET_FUEL = "ESSENCE"
 
+CURRENT_AUCTION_BID = 3550
+
 MIN_MILEAGE = 60000
 MAX_MILEAGE = 125000
 
 REQUEST_TIMEOUT = 35
 MAX_COMPARABLES_PER_SOURCE = 25
+
+AUCTION_FEE_RATE = 0.11
+TRANSPORT_COST = 300
+REPAIR_COST = 500
+OTHER_COST = 200
+TARGET_PROFIT = 1500
+RISK_RESERVE = 500
 
 
 @dataclass(frozen=True)
@@ -422,6 +432,77 @@ def calculate_confidence(
     )
 
 
+def calculate_lotrank_max(
+    safe_sale_value: int,
+) -> int:
+    fixed_costs = (
+        TRANSPORT_COST
+        + REPAIR_COST
+        + OTHER_COST
+        + TARGET_PROFIT
+        + RISK_RESERVE
+    )
+
+    available_for_bid_and_fee = (
+        safe_sale_value
+        - fixed_costs
+    )
+
+    if available_for_bid_and_fee <= 0:
+        return 0
+
+    maximum_bid = (
+        available_for_bid_and_fee
+        / (1 + AUCTION_FEE_RATE)
+    )
+
+    return max(
+        0,
+        math.floor(maximum_bid),
+    )
+
+
+def calculate_acquisition_cost(
+    bid: int,
+) -> int:
+    auction_fee = round(
+        bid * AUCTION_FEE_RATE
+    )
+
+    return (
+        bid
+        + auction_fee
+        + TRANSPORT_COST
+        + REPAIR_COST
+        + OTHER_COST
+    )
+
+
+def calculate_bid_status(
+    current_bid: int,
+    lotrank_max: int,
+) -> str:
+    if lotrank_max <= 0:
+        return "AVOID"
+
+    remaining = (
+        lotrank_max
+        - current_bid
+    )
+
+    if remaining < 0:
+        return "MAX_EXCEEDED"
+
+    near_max_limit = (
+        lotrank_max * 0.05
+    )
+
+    if remaining <= near_max_limit:
+        return "NEAR_MAX"
+
+    return "BID_ROOM_AVAILABLE"
+
+
 def process_source(
     source: dict,
 ) -> tuple[List[Comparable], bool]:
@@ -543,6 +624,11 @@ def main() -> None:
     )
 
     print(
+        "Current auction bid:",
+        CURRENT_AUCTION_BID,
+    )
+
+    print(
         "Mileage window:",
         MIN_MILEAGE,
         "-",
@@ -658,9 +744,7 @@ def main() -> None:
         for item in filtered
     )
 
-    low_price = min(
-        prices
-    )
+    low_price = min(prices)
 
     median_price = int(
         statistics.median(
@@ -668,9 +752,7 @@ def main() -> None:
         )
     )
 
-    high_price = max(
-        prices
-    )
+    high_price = max(prices)
 
     average_mileage = int(
         statistics.mean(
@@ -721,6 +803,111 @@ def main() -> None:
 
     print(
         "===== ROUTER SUMMARY END ====="
+    )
+
+    safe_sale_value = median_price
+
+    lotrank_max = calculate_lotrank_max(
+        safe_sale_value
+    )
+
+    auction_fee_at_current_bid = round(
+        CURRENT_AUCTION_BID
+        * AUCTION_FEE_RATE
+    )
+
+    acquisition_cost = (
+        calculate_acquisition_cost(
+            CURRENT_AUCTION_BID
+        )
+    )
+
+    estimated_net_profit = (
+        safe_sale_value
+        - acquisition_cost
+    )
+
+    remaining_bid_room = (
+        lotrank_max
+        - CURRENT_AUCTION_BID
+    )
+
+    bid_status = calculate_bid_status(
+        CURRENT_AUCTION_BID,
+        lotrank_max,
+    )
+
+    print(
+        "===== LOTRANK BID ENGINE ====="
+    )
+
+    print(
+        "Safe sale value:",
+        safe_sale_value,
+    )
+
+    print(
+        "Auction fee rate:",
+        f"{AUCTION_FEE_RATE * 100:.1f}%",
+    )
+
+    print(
+        "Auction fee at current bid:",
+        auction_fee_at_current_bid,
+    )
+
+    print(
+        "Transport cost:",
+        TRANSPORT_COST,
+    )
+
+    print(
+        "Repair reserve:",
+        REPAIR_COST,
+    )
+
+    print(
+        "Other costs:",
+        OTHER_COST,
+    )
+
+    print(
+        "Target profit:",
+        TARGET_PROFIT,
+    )
+
+    print(
+        "Risk reserve:",
+        RISK_RESERVE,
+    )
+
+    print(
+        "Current acquisition cost:",
+        acquisition_cost,
+    )
+
+    print(
+        "Estimated net profit at current bid:",
+        estimated_net_profit,
+    )
+
+    print(
+        "LotRank Max:",
+        lotrank_max,
+    )
+
+    print(
+        "Remaining bid room:",
+        remaining_bid_room,
+    )
+
+    print(
+        "Bid status:",
+        bid_status,
+    )
+
+    print(
+        "===== LOTRANK BID ENGINE END ====="
     )
 
     print(
