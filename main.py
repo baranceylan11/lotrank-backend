@@ -753,3 +753,9 @@ def create_listing_and_score(data: CreateListingAndScoreInput):
             "status": "error",
             "detail": str(e)
         }
+from domaine_collector import collect_domaine_lot
+
+@app.get("/test-domaine")
+def test_domaine():
+    url = "https://encheres-domaine.gouv.fr/lot/audiq7-1-doo-1.html"
+    return collect_domaine_lot(url)
