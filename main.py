@@ -766,3 +766,148 @@ async def test_domaine():
             "status": "error",
             "detail": str(e)
         }
+# =========================================================
+# DOMAINE IMPORT + AUTO SCORE
+# =========================================================
+
+class DomaineImportInput(BaseModel):
+    url: str
+    market_value: float
+    safe_sale_value: float
+
+    transport_cost: float = 0
+    repair_cost: float = 0
+    other_costs: float = 0
+    target_profit: float = 0
+    risk_reserve: float = 0
+
+    comparable_count: int = 0
+    comparable_dispersion_high: bool = False
+
+    condition_penalty: float = 0
+
+    liquidity_level: int = 5
+    competition_level: int = 5
+    source_trust_level: int = 5
+
+    vehicle_identity_quality: float = 100
+    auction_data_quality: float = 100
+    condition_data_quality: float = 90
+    cost_data_quality: float = 90
+
+
+@app.post("/import-domaine")
+async def import_domaine(data: DomaineImportInput):
+
+    try:
+        collected = await collect_domaine_lot(data.url)
+        parsed = collected.get("parsed", {})
+
+        if not parsed:
+            return {
+                "status": "error",
+                "detail": "Domaine ilan verisi okunamadi."
+            }
+
+        current_bid = parsed.get("current_bid")
+
+        if current_bid is None:
+            return {
+                "status": "error",
+                "detail": "Mevcut ihale fiyati bulunamadi."
+            }
+
+        auction_fee_pct = parsed.get("auction_fee_pct", 11)
+
+        auction_fees = (
+            current_bid * auction_fee_pct / 100
+        )
+
+        fuel_type = parsed.get("fuel_type")
+
+        if fuel_type:
+            if fuel_type.lower() == "gazole":
+                fuel_type = "DIESEL"
+            elif fuel_type.lower() == "essence":
+                fuel_type = "PETROL"
+
+        transmission = parsed.get("transmission")
+
+        if transmission:
+            if "automatique" in transmission.lower():
+                transmission = "automatic"
+            elif "manuelle" in transmission.lower():
+                transmission = "manual"
+
+        title_parts = [
+            parsed.get("brand"),
+            parsed.get("model")
+        ]
+
+        title = " ".join(
+            part for part in title_parts if part
+        )
+
+        listing_input = CreateListingAndScoreInput(
+            source_id="aab590a1-85f9-41f5-8c0e-0822b12ed776",
+            raw_listing_id=None,
+
+            title=title or "Domaine Vehicle",
+            category="car",
+            brand=parsed.get("brand"),
+            model=parsed.get("model"),
+            year=parsed.get("year"),
+            mileage_km=parsed.get("mileage_km"),
+            fuel_type=fuel_type,
+            transmission=transmission,
+            location=parsed.get("location"),
+            status="active",
+            jump_url=data.url,
+
+            market_value=data.market_value,
+            safe_sale_value=data.safe_sale_value,
+            current_bid=current_bid,
+
+            auction_fees=auction_fees,
+            transport_cost=data.transport_cost,
+            repair_cost=data.repair_cost,
+            other_costs=data.other_costs,
+
+            target_profit=data.target_profit,
+            risk_reserve=data.risk_reserve,
+
+            comparable_count=data.comparable_count,
+            comparable_dispersion_high=data.comparable_dispersion_high,
+
+            condition_penalty=data.condition_penalty,
+
+            liquidity_level=data.liquidity_level,
+            competition_level=data.competition_level,
+            source_trust_level=data.source_trust_level,
+
+            vehicle_identity_quality=data.vehicle_identity_quality,
+            auction_data_quality=data.auction_data_quality,
+            condition_data_quality=data.condition_data_quality,
+            cost_data_quality=data.cost_data_quality
+        )
+
+        result = create_listing_and_score(
+            listing_input
+        )
+
+        return {
+            "status": "ok",
+            "source": "Encheres du Domaine",
+            "collected_vehicle": parsed,
+            "risk_flags": parsed.get(
+                "risk_flags",
+                []
+            ),
+            "database_result": result
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "detail": str(e)
+        }
