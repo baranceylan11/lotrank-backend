@@ -13,17 +13,7 @@ LIST_URL = (
 )
 
 MAX_LOTS_PER_RUN = 20
-
 SOURCE_ID = "aab590a1-85f9-41f5-8c0e-0822b12ed776"
-
-
-# ---------------------------------------------------------
-# OPPORTUNITY PREFILTER
-# Goal:
-# - Filter out most low-end vehicles
-# - Prioritize mid-range and premium vehicles
-# - Keep potentially profitable mainstream models
-# ---------------------------------------------------------
 
 PREMIUM_BRANDS = {
     "AUDI",
@@ -42,65 +32,25 @@ PREMIUM_BRANDS = {
     "CUPRA",
 }
 
-MAINSTREAM_TARGET_MODELS = {
-    "PEUGEOT": {
-        "3008",
-        "5008",
-        "508",
-    },
-    "RENAULT": {
-        "AUSTRAL",
-        "ESPACE",
-        "KOLEOS",
-        "RAFALE",
-        "TALISMAN",
-    },
-    "CITROEN": {
-        "C5",
-        "C5 AIRCROSS",
-        "C6",
-    },
-    "VOLKSWAGEN": {
-        "ARTEON",
-        "PASSAT",
-        "TIGUAN",
-        "TOUAREG",
-    },
-    "SKODA": {
-        "KODIAQ",
-        "SUPERB",
-    },
-    "FORD": {
-        "EXPLORER",
-        "KUGA",
-        "MUSTANG",
-    },
-    "TOYOTA": {
-        "HIGHLANDER",
-        "LAND CRUISER",
-        "RAV4",
-    },
-    "HYUNDAI": {
-        "IONIQ 5",
-        "IONIQ 6",
-        "SANTA FE",
-        "TUCSON",
-    },
-    "KIA": {
-        "EV6",
-        "SORENTO",
-        "SPORTAGE",
-    },
-    "NISSAN": {
-        "ARIYA",
-        "QASHQAI",
-        "X-TRAIL",
-    },
-    "MAZDA": {
-        "CX-5",
-        "CX-60",
-        "CX-80",
-    },
+STRONG_MAINSTREAM_MODELS = {
+    "PEUGEOT": {"3008", "5008", "508"},
+    "RENAULT": {"AUSTRAL", "ESPACE", "KOLEOS", "RAFALE", "TALISMAN"},
+    "CITROEN": {"C5", "C5 AIRCROSS", "C6"},
+    "VOLKSWAGEN": {"ARTEON", "PASSAT", "TIGUAN", "TOUAREG"},
+    "SKODA": {"KODIAQ", "SUPERB"},
+    "FORD": {"EXPLORER", "KUGA", "MUSTANG"},
+    "TOYOTA": {"HIGHLANDER", "LAND CRUISER", "RAV4"},
+    "HYUNDAI": {"IONIQ 5", "IONIQ 6", "SANTA FE", "TUCSON"},
+    "KIA": {"EV6", "SORENTO", "SPORTAGE"},
+    "NISSAN": {"ARIYA", "QASHQAI", "X-TRAIL"},
+    "MAZDA": {"CX-5", "CX-60", "CX-80"},
+}
+
+SEVERE_RISKS = {
+    "missing_original_registration",
+    "moldy_interior",
+    "particle_filter_fault",
+    "general_wear",
 }
 
 
@@ -108,16 +58,14 @@ def normalize_text(value):
     if not value:
         return ""
 
-    return " ".join(
-        str(value).upper().split()
-    )
+    return " ".join(str(value).upper().split())
 
 
-def matches_target_model(brand, model):
+def matches_strong_mainstream_model(brand, model):
     brand = normalize_text(brand)
     model = normalize_text(model)
 
-    target_models = MAINSTREAM_TARGET_MODELS.get(
+    target_models = STRONG_MAINSTREAM_MODELS.get(
         brand,
         set(),
     )
@@ -129,82 +77,116 @@ def matches_target_model(brand, model):
     return False
 
 
-def opportunity_prefilter(parsed):
-    """
-    Returns:
-        (True, reason)  -> candidate for detailed processing
-        (False, reason) -> filtered out
-    """
-
-    brand = normalize_text(
-        parsed.get("brand")
-    )
-
-    model = normalize_text(
-        parsed.get("model")
-    )
-
+def calculate_opportunity_score(parsed):
+    brand = normalize_text(parsed.get("brand"))
+    model = normalize_text(parsed.get("model"))
     year = parsed.get("year")
     mileage = parsed.get("mileage_km")
     current_bid = parsed.get("current_bid")
+    risk_flags = parsed.get("risk_flags", []) or []
 
-    risk_flags = parsed.get(
-        "risk_flags",
-        [],
-    )
-
-    if not brand or not model:
-        return False, "missing brand or model"
+    score = 0
+    reasons = []
 
     is_premium = brand in PREMIUM_BRANDS
-
-    is_selected_mainstream = matches_target_model(
+    is_strong_mainstream = matches_strong_mainstream_model(
         brand,
         model,
     )
 
-    if not is_premium and not is_selected_mainstream:
-        return False, "low or standard segment"
+    if is_premium:
+        score += 35
+        reasons.append("premium segment +35")
+    elif is_strong_mainstream:
+        score += 25
+        reasons.append("strong mainstream segment +25")
+    else:
+        score += 5
+        reasons.append("standard segment +5")
 
-    # Age filter.
-    if year:
-        if is_premium and year < 2010:
-            return False, "premium vehicle is too old"
+    if current_bid is None:
+        score += 5
+        reasons.append("missing live bid +5")
+    elif current_bid <= 2500:
+        score += 30
+        reasons.append("very low bid +30")
+    elif current_bid <= 5000:
+        score += 24
+        reasons.append("low bid +24")
+    elif current_bid <= 8000:
+        score += 16
+        reasons.append("medium bid +16")
+    elif current_bid <= 12000:
+        score += 8
+        reasons.append("high bid +8")
+    else:
+        reasons.append("very high bid +0")
 
-        if is_selected_mainstream and year < 2014:
-            return False, "mid-range vehicle is too old"
+    if year is None:
+        reasons.append("missing year +0")
+    elif year >= 2020:
+        score += 15
+        reasons.append("year 2020+ +15")
+    elif year >= 2015:
+        score += 12
+        reasons.append("year 2015+ +12")
+    elif year >= 2010:
+        score += 8
+        reasons.append("year 2010+ +8")
+    else:
+        score += 3
+        reasons.append("older vehicle +3")
 
-    # Mileage filter.
-    if mileage:
-        if is_premium and mileage > 220000:
-            return False, "premium vehicle mileage too high"
+    if mileage is None:
+        reasons.append("missing mileage +0")
+    elif mileage <= 50000:
+        score += 12
+        reasons.append("very low mileage +12")
+    elif mileage <= 100000:
+        score += 10
+        reasons.append("low mileage +10")
+    elif mileage <= 160000:
+        score += 6
+        reasons.append("medium mileage +6")
+    elif mileage <= 220000:
+        score += 2
+        reasons.append("high mileage +2")
+    else:
+        score -= 5
+        reasons.append("very high mileage -5")
 
-        if is_selected_mainstream and mileage > 180000:
-            return False, "mid-range vehicle mileage too high"
+    for risk in risk_flags:
+        if risk in SEVERE_RISKS:
+            score -= 8
+            reasons.append(
+                f"severe risk {risk} -8"
+            )
+        else:
+            score -= 3
+            reasons.append(
+                f"risk {risk} -3"
+            )
 
-    # Severe risk filter.
-    severe_risks = {
-        "missing_original_registration",
-        "moldy_interior",
-        "particle_filter_fault",
-        "general_wear",
-    }
-
-    severe_count = sum(
-        1
-        for flag in risk_flags
-        if flag in severe_risks
+    score = max(
+        0,
+        min(100, score),
     )
 
-    if severe_count >= 3:
-        return False, "too many severe risk flags"
+    return score, reasons
 
-    # Do not reject the vehicle only because a live bid is missing.
-    # Real market valuation will be added later.
-    if current_bid is None:
-        return True, "target segment - waiting for bid data"
 
-    return True, "mid or premium opportunity candidate"
+def opportunity_prefilter(parsed):
+    score, reasons = calculate_opportunity_score(
+        parsed
+    )
+
+    if score >= 60:
+        return "HIGH_PRIORITY", score, reasons
+
+    if score >= 45:
+        return "WATCHLIST", score, reasons
+
+    return "FILTERED", score, reasons
 
 
 async def discover_vehicle_lots():
@@ -406,7 +388,7 @@ def save_listing(url, parsed):
     risk_flags = parsed.get(
         "risk_flags",
         [],
-    )
+    ) or []
 
     saved_risks = 0
 
@@ -459,6 +441,8 @@ async def main():
 
     created = 0
     skipped = 0
+    high_priority = 0
+    watchlist = 0
     filtered = 0
     errors = 0
 
@@ -524,23 +508,41 @@ async def main():
                 parsed.get("location"),
             )
 
-            is_candidate, reason = opportunity_prefilter(
-                parsed
+            status, score, reasons = (
+                opportunity_prefilter(
+                    parsed
+                )
             )
 
             print(
-                "Opportunity filter:",
-                reason,
+                "Opportunity score:",
+                score,
             )
 
-            if not is_candidate:
+            print(
+                "Opportunity status:",
+                status,
+            )
+
+            print(
+                "Opportunity reasons:",
+                " | ".join(reasons),
+            )
+
+            if status == "FILTERED":
                 filtered += 1
 
                 print(
-                    "FILTERED - not target segment"
+                    "FILTERED - low opportunity score"
                 )
 
                 continue
+
+            if status == "HIGH_PRIORITY":
+                high_priority += 1
+
+            elif status == "WATCHLIST":
+                watchlist += 1
 
             database_result = save_listing(
                 url,
@@ -576,6 +578,16 @@ async def main():
     print(
         "Skipped:",
         skipped,
+    )
+
+    print(
+        "High priority:",
+        high_priority,
+    )
+
+    print(
+        "Watchlist:",
+        watchlist,
     )
 
     print(
