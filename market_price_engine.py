@@ -1,202 +1,149 @@
-import re
-import requests
-from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 
-TEST_URL = "https://www.lacentrale.fr/occasion-voiture-modele-peugeot-208.html"
-
-HEADERS = {
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;q=0.9,"
-        "image/avif,image/webp,*/*;q=0.8"
-    ),
-    "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "Referer": "https://www.lacentrale.fr/",
-    "User-Agent": (
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-        "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/124.0.0.0 Safari/537.36"
-    ),
-}
+TEST_URL = (
+    "https://www.lacentrale.fr/"
+    "occasion-voiture-modele-peugeot-208.html"
+)
 
 
-def clean_text(value: str) -> str:
-    value = value.replace("\u00a0", " ").replace("\u202f", " ")
-    return re.sub(r"\s+", " ", value).strip()
+def normalize_text(value: str) -> str:
+    return " ".join(value.split())
 
 
-def extract_vehicle_candidates(text: str):
-    pattern = re.compile(
-        r"\b(20(?:0\d|1\d|2\d))\b"
-        r".{0,80}?"
-        r"\b(\d{1,3}(?:[ .]\d{3})+|\d{4,6})\s*km\b"
-        r".{0,80}?"
-        r"\b(Essence|Diesel|Hybride(?:s)?|Électrique|Electrique)\b"
-        r".{0,80}?"
-        r"\b(\d{1,3}(?:[ .]\d{3})+|\d{3,6})\s*€",
-        re.IGNORECASE,
-    )
-
-    results = []
-
-    for match in pattern.finditer(text):
-        year = int(match.group(1))
-        mileage = int(re.sub(r"\D", "", match.group(2)))
-        fuel = match.group(3).upper()
-        price = int(re.sub(r"\D", "", match.group(4)))
-
-        if not (2000 <= year <= 2030):
-            continue
-
-        if not (0 <= mileage <= 1_000_000):
-            continue
-
-        if not (500 <= price <= 500_000):
-            continue
-
-        results.append(
-            {
-                "year": year,
-                "mileage": mileage,
-                "fuel": fuel,
-                "price": price,
-            }
-        )
-
-    return results
-
-
-def main():
-    print("=== LACENTRALE PUBLIC HTML TEST START ===")
+def run_test() -> None:
+    print("=== LACENTRALE JAVASCRIPT TEST START ===")
     print("URL:", TEST_URL)
     print("Database writes: no")
-    print("API key used: no")
 
-    try:
-        response = requests.get(
-            TEST_URL,
-            headers=HEADERS,
-            timeout=30,
-            allow_redirects=True,
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
         )
 
-    except requests.RequestException as error:
-        print("Status: REQUEST_FAILED")
-        print("Error type:", type(error).__name__)
-        print("Error:", str(error))
-        print("=== LACENTRALE PUBLIC HTML TEST END ===")
-        return
-
-    print("HTTP status:", response.status_code)
-    print("Final URL:", response.url)
-    print("Content-Type:", response.headers.get("content-type"))
-    print("Response bytes:", len(response.content))
-
-    soup = BeautifulSoup(response.text, "html.parser")
-
-    if soup.title:
-        page_title = clean_text(
-            soup.title.get_text(" ", strip=True)
+        context = browser.new_context(
+            locale="fr-FR",
+            timezone_id="Europe/Paris",
+            viewport={
+                "width": 1440,
+                "height": 1000,
+            },
+            user_agent=(
+                "Mozilla/5.0 "
+                "(Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 "
+                "(KHTML, like Gecko) "
+                "Chrome/124.0.0.0 "
+                "Safari/537.36"
+            ),
         )
-    else:
-        page_title = ""
 
-    page_text = clean_text(
-        soup.get_text(" ", strip=True)
-    )
+        page = context.new_page()
 
-    print("Page title:", page_title[:200])
-    print("Visible text length:", len(page_text))
-
-    lower_text = page_text.lower()
-
-    block_terms = (
-        "access denied",
-        "forbidden",
-        "captcha",
-        "verify you are human",
-        "vérifiez que vous êtes humain",
-    )
-
-    blocked = any(
-        term in lower_text
-        for term in block_terms
-    )
-
-    vehicle_candidates = extract_vehicle_candidates(
-        page_text
-    )
-
-    price_count = len(
-        re.findall(
-            r"\b\d{1,3}(?:[ .]\d{3})+\s*€",
-            page_text,
-        )
-    )
-
-    mileage_count = len(
-        re.findall(
-            r"\b\d{1,3}(?:[ .]\d{3})+\s*km\b",
-            page_text,
-            re.IGNORECASE,
-        )
-    )
-
-    print(
-        "Blocked page detected:",
-        "yes" if blocked else "no",
-    )
-
-    print(
-        "Price patterns found:",
-        price_count,
-    )
-
-    print(
-        "Mileage patterns found:",
-        mileage_count,
-    )
-
-    print(
-        "Vehicle candidates parsed:",
-        len(vehicle_candidates),
-    )
-
-    if response.status_code == 200 and vehicle_candidates:
-        print("Status: OK")
-
-        for index, vehicle in enumerate(
-            vehicle_candidates[:10],
-            start=1,
-        ):
-            print(
-                f"Vehicle {index}: "
-                f"year={vehicle['year']} "
-                f"mileage={vehicle['mileage']} "
-                f"fuel={vehicle['fuel']} "
-                f"price={vehicle['price']}"
+        try:
+            response = page.goto(
+                TEST_URL,
+                wait_until="domcontentloaded",
+                timeout=60000,
             )
 
-    elif response.status_code == 200 and not blocked:
-        print("Status: PAGE_REACHED_NO_CANDIDATES")
-        print(
-            "Text preview:",
-            page_text[:1200],
-        )
+            print(
+                "Initial HTTP status:",
+                response.status if response else None,
+            )
 
-    else:
-        print("Status: BLOCKED_OR_UNAVAILABLE")
-        print(
-            "Text preview:",
-            page_text[:1200],
-        )
+            page.wait_for_timeout(12000)
 
-    print(
-        "=== LACENTRALE PUBLIC HTML TEST END ==="
-    )
+            title = page.title()
+            body_text = page.locator("body").inner_text(
+                timeout=10000
+            )
+
+            clean_body = normalize_text(body_text)
+            lower_body = clean_body.lower()
+
+            price_count = clean_body.count("€")
+            mileage_count = lower_body.count("km")
+
+            vehicle_links = page.locator(
+                'a[href*="auto-occasion-annonce"]'
+            ).count()
+
+            js_gate = (
+                "please enable js" in lower_body
+                or "enable javascript" in lower_body
+            )
+
+            forbidden = (
+                "access denied" in lower_body
+                or "forbidden" in lower_body
+            )
+
+            print("Final URL:", page.url)
+            print("Page title:", title)
+            print(
+                "Visible text length:",
+                len(clean_body),
+            )
+            print(
+                "Price symbols found:",
+                price_count,
+            )
+            print(
+                "Mileage references found:",
+                mileage_count,
+            )
+            print(
+                "Vehicle links found:",
+                vehicle_links,
+            )
+            print(
+                "JavaScript gate detected:",
+                "yes" if js_gate else "no",
+            )
+            print(
+                "Access block detected:",
+                "yes" if forbidden else "no",
+            )
+
+            if vehicle_links > 0:
+                print("Status: OK")
+            elif (
+                len(clean_body) > 3000
+                and price_count > 0
+                and mileage_count > 0
+            ):
+                print("Status: CONTENT_VISIBLE")
+            elif js_gate:
+                print("Status: JS_GATE_NOT_CLEARED")
+            elif forbidden:
+                print("Status: ACCESS_BLOCKED")
+            else:
+                print("Status: PAGE_LOADED_NO_LISTINGS")
+
+            print(
+                "Text preview:",
+                clean_body[:1500],
+            )
+
+        except Exception as error:
+            print("Status: ERROR")
+            print(
+                "Error type:",
+                type(error).__name__,
+            )
+            print("Error:", str(error))
+
+        finally:
+            context.close()
+            browser.close()
+
+    print("=== LACENTRALE JAVASCRIPT TEST END ===")
 
 
 if __name__ == "__main__":
-    main()
+    run_test()
