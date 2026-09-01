@@ -890,19 +890,50 @@ async def import_domaine(data: DomaineImportInput):
             condition_data_quality=data.condition_data_quality,
             cost_data_quality=data.cost_data_quality
         )
-
         result = create_listing_and_score(
             listing_input
         )
+
+        # Domaine risklerini risk_flags tablosuna kaydet
+        listing_id = result.get("listing_id")
+        domaine_risks = parsed.get("risk_flags", [])
+
+        saved_risks = 0
+
+        if listing_id and domaine_risks:
+            conn = psycopg2.connect(
+                os.environ["DATABASE_URL"]
+            )
+            cur = conn.cursor()
+
+            for risk in domaine_risks:
+                cur.execute(
+                    """
+                    INSERT INTO risk_flags (
+                        listing_id,
+                        flag_type,
+                        description
+                    )
+                    VALUES (%s, %s, %s)
+                    """,
+                    (
+                        listing_id,
+                        risk,
+                        risk
+                    )
+                )
+                saved_risks += 1
+
+            conn.commit()
+            cur.close()
+            conn.close()
 
         return {
             "status": "ok",
             "source": "Encheres du Domaine",
             "collected_vehicle": parsed,
-            "risk_flags": parsed.get(
-                "risk_flags",
-                []
-            ),
+            "risk_flags": domaine_risks,
+            "risk_flags_saved": saved_risks,
             "database_result": result
         }
 
@@ -911,3 +942,4 @@ async def import_domaine(data: DomaineImportInput):
             "status": "error",
             "detail": str(e)
         }
+      
