@@ -754,8 +754,15 @@ def create_listing_and_score(data: CreateListingAndScoreInput):
             "detail": str(e)
         }
 from domaine_collector import collect_domaine_lot
-
 @app.get("/test-domaine")
-def test_domaine():
+async def test_domaine():
     url = "https://encheres-domaine.gouv.fr/lot/audiq7-1-doo-1.html"
-    return collect_domaine_lot(url)
+
+    try:
+        result = await collect_domaine_lot(url)
+        return result
+    except Exception as e:
+        return {
+            "status": "error",
+            "detail": str(e)
+        }
