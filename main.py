@@ -426,3 +426,137 @@ def score_preview(data: LotRankInput):
 
         "confidence_warning": confidence_warning
     }
+# =========================================================
+# SCORE REAL LISTING + SAVE TO DATABASE
+# =========================================================
+
+@app.post("/score-listing/{listing_id}")
+def score_listing(listing_id: str, data: LotRankInput):
+
+    conn = None
+    cur = None
+
+    try:
+        # Önce mevcut LotRank motoruyla hesapla
+        result = score_preview(data)
+
+        conn = psycopg2.connect(
+            os.environ["DATABASE_URL"]
+        )
+
+        cur = conn.cursor()
+
+        # İlan gerçekten var mı kontrol et
+        cur.execute(
+            """
+            SELECT id, title
+            FROM listings
+            WHERE id = %s::uuid;
+            """,
+            (listing_id,)
+        )
+
+        listing = cur.fetchone()
+
+        if not listing:
+            cur.close()
+            conn.close()
+
+            return {
+                "status": "error",
+                "detail": "LISTING_NOT_FOUND"
+            }
+
+        # Bu ilana daha önce score yazılmış mı?
+        cur.execute(
+            """
+            SELECT id
+            FROM scores
+            WHERE listing_id = %s::uuid
+            ORDER BY calculated_at DESC
+            LIMIT 1;
+            """,
+            (listing_id,)
+        )
+
+        existing_score = cur.fetchone()
+
+        if existing_score:
+
+            cur.execute(
+                """
+                UPDATE scores
+                SET
+                    lotrank_score = %s,
+                    confidence = %s,
+                    lotrank_max = %s,
+                    calculated_at = NOW()
+                WHERE id = %s;
+                """,
+                (
+                    result["lotrank_score"],
+                    result["confidence"],
+                    result["lotrank_max"],
+                    existing_score[0]
+                )
+            )
+
+            database_action = "UPDATED"
+
+        else:
+
+            cur.execute(
+                """
+                INSERT INTO scores (
+                    listing_id,
+                    lotrank_score,
+                    confidence,
+                    lotrank_max,
+                    calculated_at
+                )
+                VALUES (
+                    %s::uuid,
+                    %s,
+                    %s,
+                    %s,
+                    NOW()
+                );
+                """,
+                (
+                    listing_id,
+                    result["lotrank_score"],
+                    result["confidence"],
+                    result["lotrank_max"]
+                )
+            )
+
+            database_action = "CREATED"
+
+        conn.commit()
+
+        cur.close()
+        conn.close()
+
+        return {
+            "status": "ok",
+            "listing_id": listing_id,
+            "listing_title": listing[1],
+            "score_database_action": database_action,
+            "analysis": result
+        }
+
+    except Exception as e:
+
+        if conn:
+            conn.rollback()
+
+        if cur:
+            cur.close()
+
+        if conn:
+            conn.close()
+
+        return {
+            "status": "error",
+            "detail": str(e)
+        }
