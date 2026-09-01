@@ -1,26 +1,18 @@
 import math
+import os
 import re
 import statistics
+import unicodedata
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
+import psycopg2
 import requests
 from bs4 import BeautifulSoup
 
 
-VERSION = "MARKET SOURCE ROUTER V6"
-
-TARGET_BRAND = "PEUGEOT"
-TARGET_MODEL = "208"
-TARGET_YEAR = 2019
-TARGET_MILEAGE = 92910
-TARGET_FUEL = "ESSENCE"
-
-CURRENT_AUCTION_BID = 3550
-
-MIN_MILEAGE = 60000
-MAX_MILEAGE = 125000
+VERSION = "MARKET SOURCE ROUTER V7 DB"
 
 REQUEST_TIMEOUT = 35
 MAX_COMPARABLES_PER_SOURCE = 25
@@ -37,6 +29,20 @@ SOURCE_TRUST = {
 DUPLICATE_MILEAGE_TOLERANCE = 100
 DUPLICATE_PRICE_TOLERANCE = 50
 
+TARGET_LISTING_ID = os.environ.get("MARKET_TEST_LISTING_ID")
+
+TARGET_BRAND = ""
+TARGET_MODEL = ""
+TARGET_YEAR = 0
+TARGET_MILEAGE = 0
+TARGET_FUEL = ""
+TARGET_LOCATION = ""
+CURRENT_AUCTION_BID = 0
+CURRENT_LISTING_ID = ""
+
+MIN_MILEAGE = 0
+MAX_MILEAGE = 0
+
 
 @dataclass(frozen=True)
 class Comparable:
@@ -45,24 +51,6 @@ class Comparable:
     mileage: int
     fuel: str
     price: int
-
-
-SOURCES = [
-    {
-        "name": "PARUVENDU",
-        "url": "https://www.paruvendu.fr/a/voiture-occasion/peugeot/208/essence/",
-    },
-    {
-        "name": "AUTOSCOUT24",
-        "url": (
-            "https://www.autoscout24.fr/lst/peugeot/208"
-            "?atype=C&cy=F&damaged_listing=exclude&desc=0"
-            "&fregfrom=2019&fregto=2019&fuel=B"
-            "&kmfrom=60000&kmto=125000"
-            "&sort=standard&ustate=N%2CU"
-        ),
-    },
-]
 
 
 HEADERS = {
@@ -93,10 +81,18 @@ def parse_int(value: str) -> int:
     return int(digits)
 
 
-def normalize_fuel(value: str) -> str:
-    normalized = value.upper().replace("É", "E")
+def slugify(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value)
+    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
+    ascii_value = ascii_value.lower().strip()
+    ascii_value = re.sub(r"[^a-z0-9]+", "-", ascii_value)
+    return ascii_value.strip("-")
 
-    if "ESSENCE" in normalized:
+
+def normalize_fuel(value: str) -> str:
+    normalized = value.upper().replace("É", "E").strip()
+
+    if normalized in {"PETROL", "GASOLINE", "ESSENCE"} or "ESSENCE" in normalized:
         return "ESSENCE"
 
     if "DIESEL" in normalized:
@@ -109,6 +105,212 @@ def normalize_fuel(value: str) -> str:
         return "HYBRID"
 
     return normalized
+
+
+def load_target_from_database() -> None:
+    global TARGET_BRAND
+    global TARGET_MODEL
+    global TARGET_YEAR
+    global TARGET_MILEAGE
+    global TARGET_FUEL
+    global TARGET_LOCATION
+    global CURRENT_AUCTION_BID
+    global CURRENT_LISTING_ID
+    global MIN_MILEAGE
+    global MAX_MILEAGE
+
+    database_url = os.environ.get("DATABASE_URL")
+
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is missing")
+
+    connection = psycopg2.connect(database_url)
+
+    try:
+        with connection.cursor() as cursor:
+            if TARGET_LISTING_ID:
+                cursor.execute(
+                    """
+                    SELECT
+                        l.id,
+                        l.brand,
+                        l.model,
+                        l.year,
+                        l.mileage_km,
+                        l.fuel_type,
+                        l.location,
+                        ph.price
+                    FROM listings AS l
+                    JOIN LATERAL (
+                        SELECT price
+                        FROM price_history
+                        WHERE listing_id = l.id
+                        ORDER BY recorded_at DESC
+                        LIMIT 1
+                    ) AS ph ON TRUE
+                    WHERE
+                        l.id = %s
+                        AND l.status = 'active'
+                        AND l.brand IS NOT NULL
+                        AND l.model IS NOT NULL
+                        AND l.year IS NOT NULL
+                        AND l.mileage_km IS NOT NULL
+                        AND l.fuel_type IS NOT NULL
+                    LIMIT 1
+                    """,
+                    (TARGET_LISTING_ID,),
+                )
+
+            else:
+                cursor.execute(
+                    """
+                    SELECT
+                        l.id,
+                        l.brand,
+                        l.model,
+                        l.year,
+                        l.mileage_km,
+                        l.fuel_type,
+                        l.location,
+                        ph.price
+                    FROM listings AS l
+                    JOIN LATERAL (
+                        SELECT price
+                        FROM price_history
+                        WHERE listing_id = l.id
+                        ORDER BY recorded_at DESC
+                        LIMIT 1
+                    ) AS ph ON TRUE
+                    WHERE
+                        l.status = 'active'
+                        AND l.category = 'car'
+                        AND l.brand IS NOT NULL
+                        AND l.model IS NOT NULL
+                        AND l.year IS NOT NULL
+                        AND l.mileage_km IS NOT NULL
+                        AND l.fuel_type IS NOT NULL
+                    ORDER BY l.updated_at DESC NULLS LAST, l.created_at DESC
+                    LIMIT 1
+                    """
+                )
+
+            row = cursor.fetchone()
+
+    finally:
+        connection.close()
+
+    if not row:
+        raise RuntimeError("No active vehicle with price history was found")
+
+    (
+        listing_id,
+        brand,
+        model,
+        year,
+        mileage,
+        fuel,
+        location,
+        current_bid,
+    ) = row
+
+    CURRENT_LISTING_ID = str(listing_id)
+    TARGET_BRAND = str(brand).strip().upper()
+    TARGET_MODEL = str(model).strip().upper()
+    TARGET_YEAR = int(year)
+    TARGET_MILEAGE = int(mileage)
+    TARGET_FUEL = normalize_fuel(str(fuel))
+    TARGET_LOCATION = str(location or "").strip()
+    CURRENT_AUCTION_BID = int(current_bid)
+
+    mileage_margin = max(
+        25000,
+        min(
+            50000,
+            round(TARGET_MILEAGE * 0.35),
+        ),
+    )
+
+    MIN_MILEAGE = max(
+        0,
+        TARGET_MILEAGE - mileage_margin,
+    )
+
+    MAX_MILEAGE = (
+        TARGET_MILEAGE
+        + mileage_margin
+    )
+
+
+def build_sources() -> List[dict]:
+    brand_slug = slugify(TARGET_BRAND)
+    model_slug = slugify(TARGET_MODEL)
+
+    if not brand_slug or not model_slug:
+        raise RuntimeError(
+            "Brand or model cannot be converted to a search URL"
+        )
+
+    paruvendu_fuel_map = {
+        "ESSENCE": "essence",
+        "DIESEL": "diesel",
+        "HYBRID": "hybride",
+        "ELECTRIC": "electrique",
+    }
+
+    autoscout_fuel_map = {
+        "ESSENCE": "B",
+        "DIESEL": "D",
+        "HYBRID": "2",
+        "ELECTRIC": "E",
+    }
+
+    sources: List[dict] = []
+
+    paruvendu_fuel = paruvendu_fuel_map.get(
+        TARGET_FUEL
+    )
+
+    if paruvendu_fuel:
+        sources.append(
+            {
+                "name": "PARUVENDU",
+                "url": (
+                    "https://www.paruvendu.fr/a/voiture-occasion/"
+                    f"{quote(brand_slug)}/"
+                    f"{quote(model_slug)}/"
+                    f"{quote(paruvendu_fuel)}/"
+                ),
+            }
+        )
+
+    autoscout_fuel = autoscout_fuel_map.get(
+        TARGET_FUEL
+    )
+
+    if autoscout_fuel:
+        sources.append(
+            {
+                "name": "AUTOSCOUT24",
+                "url": (
+                    f"https://www.autoscout24.fr/lst/"
+                    f"{quote(brand_slug)}/"
+                    f"{quote(model_slug)}"
+                    "?atype=C"
+                    "&cy=F"
+                    "&damaged_listing=exclude"
+                    "&desc=0"
+                    f"&fregfrom={TARGET_YEAR}"
+                    f"&fregto={TARGET_YEAR}"
+                    f"&fuel={quote(autoscout_fuel)}"
+                    f"&kmfrom={MIN_MILEAGE}"
+                    f"&kmto={MAX_MILEAGE}"
+                    "&sort=standard"
+                    "&ustate=N%2CU"
+                ),
+            }
+        )
+
+    return sources
 
 
 def is_valid_comparable(
@@ -132,7 +334,9 @@ def is_valid_comparable(
     return True
 
 
-def fetch_direct(url: str) -> Optional[requests.Response]:
+def fetch_direct(
+    url: str,
+) -> Optional[requests.Response]:
     try:
         return requests.get(
             url,
@@ -147,6 +351,7 @@ def fetch_direct(url: str) -> Optional[requests.Response]:
             type(error).__name__,
             str(error),
         )
+
         return None
 
 
@@ -185,57 +390,86 @@ def deduplicate_source_results(
         seen.add(key)
         unique.append(item)
 
-    return unique[:MAX_COMPARABLES_PER_SOURCE]
+    return unique[
+        :MAX_COMPARABLES_PER_SOURCE
+    ]
 
 
 def extract_paruvendu_comparables(
     text: str,
 ) -> List[Comparable]:
+    identity = (
+        re.escape(TARGET_BRAND)
+        + r"\s+"
+        + re.escape(TARGET_MODEL)
+    )
+
     patterns = [
         re.compile(
-            r"PEUGEOT\s+208"
-            r".{0,320}?"
-            r"\b(20\d{2})\b"
-            r".{0,180}?"
-            r"(\d{1,3}(?:[ .]\d{3})+|\d{4,6})\s*(?:KM|KMS)\b"
-            r".{0,140}?"
-            r"(ESSENCE|DIESEL|HYBRIDE|ELECTRIQUE|ÉLECTRIQUE)"
-            r".{0,180}?"
-            r"(\d{1,3}(?:[ .]\d{3})+|\d{3,6})\s*€",
+            identity
+            + r".{0,320}?"
+            + r"\b(20\d{2})\b"
+            + r".{0,180}?"
+            + r"(\d{1,3}(?:[ .]\d{3})+|\d{4,6})\s*(?:KM|KMS)\b"
+            + r".{0,140}?"
+            + r"(ESSENCE|DIESEL|HYBRIDE|ELECTRIQUE|ÉLECTRIQUE)"
+            + r".{0,180}?"
+            + r"(\d{1,3}(?:[ .]\d{3})+|\d{3,6})\s*€",
             re.IGNORECASE,
         ),
         re.compile(
             r"(\d{1,3}(?:[ .]\d{3})+|\d{3,6})\s*€"
-            r".{0,280}?"
-            r"PEUGEOT\s+208"
-            r".{0,280}?"
-            r"\b(20\d{2})\b"
-            r".{0,180}?"
-            r"(\d{1,3}(?:[ .]\d{3})+|\d{4,6})\s*(?:KM|KMS)\b"
-            r".{0,140}?"
-            r"(ESSENCE|DIESEL|HYBRIDE|ELECTRIQUE|ÉLECTRIQUE)",
+            + r".{0,280}?"
+            + identity
+            + r".{0,280}?"
+            + r"\b(20\d{2})\b"
+            + r".{0,180}?"
+            + r"(\d{1,3}(?:[ .]\d{3})+|\d{4,6})\s*(?:KM|KMS)\b"
+            + r".{0,140}?"
+            + r"(ESSENCE|DIESEL|HYBRIDE|ELECTRIQUE|ÉLECTRIQUE)",
             re.IGNORECASE,
         ),
     ]
 
     results: List[Comparable] = []
 
-    for pattern_index, pattern in enumerate(patterns):
+    for pattern_index, pattern in enumerate(
+        patterns
+    ):
         for match in pattern.finditer(text):
             try:
                 if pattern_index == 0:
-                    year = int(match.group(1))
-                    mileage = parse_int(match.group(2))
-                    fuel = normalize_fuel(match.group(3))
-                    price = parse_int(match.group(4))
+                    year = int(
+                        match.group(1)
+                    )
+                    mileage = parse_int(
+                        match.group(2)
+                    )
+                    fuel = normalize_fuel(
+                        match.group(3)
+                    )
+                    price = parse_int(
+                        match.group(4)
+                    )
 
                 else:
-                    price = parse_int(match.group(1))
-                    year = int(match.group(2))
-                    mileage = parse_int(match.group(3))
-                    fuel = normalize_fuel(match.group(4))
+                    price = parse_int(
+                        match.group(1)
+                    )
+                    year = int(
+                        match.group(2)
+                    )
+                    mileage = parse_int(
+                        match.group(3)
+                    )
+                    fuel = normalize_fuel(
+                        match.group(4)
+                    )
 
-            except (ValueError, IndexError):
+            except (
+                ValueError,
+                IndexError,
+            ):
                 continue
 
             if is_valid_comparable(
@@ -254,7 +488,9 @@ def extract_paruvendu_comparables(
                     )
                 )
 
-    return deduplicate_source_results(results)
+    return deduplicate_source_results(
+        results
+    )
 
 
 def extract_autoscout24_comparables(
@@ -285,22 +521,43 @@ def extract_autoscout24_comparables(
 
     results: List[Comparable] = []
 
-    for pattern_index, pattern in enumerate(patterns):
+    for pattern_index, pattern in enumerate(
+        patterns
+    ):
         for match in pattern.finditer(text):
             try:
                 if pattern_index == 0:
-                    price = parse_int(match.group(1))
-                    year = int(match.group(3))
-                    mileage = parse_int(match.group(4))
-                    fuel = normalize_fuel(match.group(5))
+                    price = parse_int(
+                        match.group(1)
+                    )
+                    year = int(
+                        match.group(3)
+                    )
+                    mileage = parse_int(
+                        match.group(4)
+                    )
+                    fuel = normalize_fuel(
+                        match.group(5)
+                    )
 
                 else:
-                    year = int(match.group(2))
-                    mileage = parse_int(match.group(3))
-                    fuel = normalize_fuel(match.group(4))
-                    price = parse_int(match.group(5))
+                    year = int(
+                        match.group(2)
+                    )
+                    mileage = parse_int(
+                        match.group(3)
+                    )
+                    fuel = normalize_fuel(
+                        match.group(4)
+                    )
+                    price = parse_int(
+                        match.group(5)
+                    )
 
-            except (ValueError, IndexError):
+            except (
+                ValueError,
+                IndexError,
+            ):
                 continue
 
             if is_valid_comparable(
@@ -319,7 +576,9 @@ def extract_autoscout24_comparables(
                     )
                 )
 
-    return deduplicate_source_results(results)
+    return deduplicate_source_results(
+        results
+    )
 
 
 def extract_comparables(
@@ -327,10 +586,14 @@ def extract_comparables(
     text: str,
 ) -> List[Comparable]:
     if source == "PARUVENDU":
-        return extract_paruvendu_comparables(text)
+        return extract_paruvendu_comparables(
+            text
+        )
 
     if source == "AUTOSCOUT24":
-        return extract_autoscout24_comparables(text)
+        return extract_autoscout24_comparables(
+            text
+        )
 
     return []
 
@@ -349,17 +612,25 @@ def remove_cross_source_duplicates(
                 continue
 
             same_identity = (
-                candidate.year == existing.year
-                and candidate.fuel == existing.fuel
+                candidate.year
+                == existing.year
+                and candidate.fuel
+                == existing.fuel
             )
 
             extremely_close_mileage = (
-                abs(candidate.mileage - existing.mileage)
+                abs(
+                    candidate.mileage
+                    - existing.mileage
+                )
                 <= DUPLICATE_MILEAGE_TOLERANCE
             )
 
             extremely_close_price = (
-                abs(candidate.price - existing.price)
+                abs(
+                    candidate.price
+                    - existing.price
+                )
                 <= DUPLICATE_PRICE_TOLERANCE
             )
 
@@ -394,7 +665,10 @@ def remove_price_outliers(
     )
 
     absolute_deviations = [
-        abs(price - median_price)
+        abs(
+            price
+            - median_price
+        )
         for price in prices
     ]
 
@@ -419,12 +693,10 @@ def remove_price_outliers(
         <= 3.5
     ]
 
-    removed = (
-        len(items)
-        - len(filtered)
+    return (
+        filtered,
+        len(items) - len(filtered),
     )
-
-    return filtered, removed
 
 
 def percentile(
@@ -788,15 +1060,9 @@ def calculate_acquisition_cost(
     return (
         bid
         + auction_fee
-        + costs[
-            "transport_cost"
-        ]
-        + costs[
-            "repair_reserve"
-        ]
-        + costs[
-            "other_cost"
-        ]
+        + costs["transport_cost"]
+        + costs["repair_reserve"]
+        + costs["other_cost"]
     )
 
 
@@ -815,12 +1081,9 @@ def calculate_bid_status(
     if remaining < 0:
         return "MAX_EXCEEDED"
 
-    near_max_limit = (
-        lotrank_max
-        * 0.05
-    )
-
-    if remaining <= near_max_limit:
+    if remaining <= (
+        lotrank_max * 0.05
+    ):
         return "NEAR_MAX"
 
     return "BID_ROOM_AVAILABLE"
@@ -828,10 +1091,7 @@ def calculate_bid_status(
 
 def process_source(
     source: dict,
-) -> Tuple[
-    List[Comparable],
-    bool,
-]:
+) -> Tuple[List[Comparable], bool]:
     name = source["name"]
     url = source["url"]
 
@@ -873,8 +1133,7 @@ def process_source(
         response.status_code != 200
         or len(
             response.content
-        )
-        <= 1000
+        ) <= 1000
     ):
         print(
             "Source status: UNAVAILABLE"
@@ -942,6 +1201,25 @@ def main() -> None:
     )
 
     print(
+        "Database target mode: enabled"
+    )
+
+    print(
+        "Database writes: no"
+    )
+
+    print(
+        "Paid proxy fallback: disabled"
+    )
+
+    load_target_from_database()
+
+    print(
+        "Listing ID:",
+        CURRENT_LISTING_ID,
+    )
+
+    print(
         f"Target vehicle: "
         f"{TARGET_BRAND} "
         f"{TARGET_MODEL}"
@@ -963,6 +1241,11 @@ def main() -> None:
     )
 
     print(
+        "Target location:",
+        TARGET_LOCATION,
+    )
+
+    print(
         "Current auction bid:",
         CURRENT_AUCTION_BID,
     )
@@ -974,13 +1257,18 @@ def main() -> None:
         MAX_MILEAGE,
     )
 
-    print(
-        "Database writes: no"
-    )
+    sources = build_sources()
 
-    print(
-        "Paid proxy fallback: disabled"
-    )
+    if not sources:
+        print(
+            "Status: UNSUPPORTED_FUEL_FOR_MARKET_SOURCES"
+        )
+
+        print(
+            f"=== {VERSION} END ==="
+        )
+
+        return
 
     all_comparables: List[
         Comparable
@@ -988,11 +1276,9 @@ def main() -> None:
 
     reached_sources = 0
 
-    for source in SOURCES:
-        comparables, reached = (
-            process_source(
-                source
-            )
+    for source in sources:
+        comparables, reached = process_source(
+            source
         )
 
         if reached:
@@ -1229,7 +1515,8 @@ def main() -> None:
     )
 
     print(
-        "Source weighting: SAMPLE_SIZE_X_TRUST"
+        "Source weighting:",
+        "SAMPLE_SIZE_X_TRUST",
     )
 
     for source in source_names:
