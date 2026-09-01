@@ -1,171 +1,184 @@
-from playwright.sync_api import sync_playwright
+import os
+import re
+import requests
+from bs4 import BeautifulSoup
 
 
-TEST_URL = "https://www.leboncoin.fr/ad/voitures/3253062580"
+ZENROWS_API_URL = "https://api.zenrows.com/v1/"
+
+TARGET_URL = (
+    "https://www.lacentrale.fr/"
+    "occasion-voiture-modele-peugeot-208.html"
+)
 
 
-def normalize_text(value: str) -> str:
-    return " ".join(value.split())
+def clean_text(value: str) -> str:
+    value = value.replace("\u00a0", " ")
+    value = value.replace("\u202f", " ")
+    return re.sub(r"\s+", " ", value).strip()
 
 
-def run_test() -> None:
-    print("=== LEBONCOIN ACCESS TEST START ===")
-    print("URL:", TEST_URL)
+def main() -> None:
+    print("=== ZENROWS LACENTRALE TEST START ===")
+    print("Target:", TARGET_URL)
     print("Database writes: no")
 
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
-            headless=True,
-            args=[
-                "--no-sandbox",
-                "--disable-dev-shm-usage",
-            ],
+    api_key = os.environ.get("ZENROWS_API_KEY")
+
+    if not api_key:
+        print("Status: MISSING_API_KEY")
+        print("ZENROWS_API_KEY was not found.")
+        print("=== ZENROWS LACENTRALE TEST END ===")
+        return
+
+    print("API key configured: yes")
+
+    params = {
+        "url": TARGET_URL,
+        "apikey": api_key,
+        "js_render": "true",
+        "premium_proxy": "true",
+        "proxy_country": "fr",
+    }
+
+    try:
+        response = requests.get(
+            ZENROWS_API_URL,
+            params=params,
+            timeout=120,
         )
 
-        context = browser.new_context(
-            locale="fr-FR",
-            timezone_id="Europe/Paris",
-            viewport={
-                "width": 1440,
-                "height": 1000,
-            },
-            user_agent=(
-                "Mozilla/5.0 "
-                "(Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 "
-                "(KHTML, like Gecko) "
-                "Chrome/124.0.0.0 "
-                "Safari/537.36"
-            ),
+    except requests.RequestException as error:
+        print("Status: REQUEST_FAILED")
+        print("Error type:", type(error).__name__)
+        print("Error:", str(error))
+        print("=== ZENROWS LACENTRALE TEST END ===")
+        return
+
+    print("ZenRows HTTP status:", response.status_code)
+    print(
+        "Content-Type:",
+        response.headers.get("content-type"),
+    )
+    print("Response bytes:", len(response.content))
+
+    if response.status_code != 200:
+        print("Status: ZENROWS_ERROR")
+        print(
+            "Response preview:",
+            clean_text(response.text)[:1200],
+        )
+        print("=== ZENROWS LACENTRALE TEST END ===")
+        return
+
+    soup = BeautifulSoup(
+        response.text,
+        "html.parser",
+    )
+
+    page_text = clean_text(
+        soup.get_text(" ", strip=True)
+    )
+
+    page_title = ""
+
+    if soup.title:
+        page_title = clean_text(
+            soup.title.get_text(
+                " ",
+                strip=True,
+            )
         )
 
-        page = context.new_page()
+    lower_text = page_text.lower()
 
-        try:
-            response = page.goto(
-                TEST_URL,
-                wait_until="domcontentloaded",
-                timeout=60000,
-            )
+    price_matches = re.findall(
+        r"\b\d{1,3}(?:[ .]\d{3})+\s*€",
+        page_text,
+    )
 
-            print(
-                "Initial HTTP status:",
-                response.status if response else None,
-            )
+    mileage_matches = re.findall(
+        r"\b\d{1,3}(?:[ .]\d{3})+\s*km\b",
+        page_text,
+        re.IGNORECASE,
+    )
 
-            page.wait_for_timeout(10000)
+    vehicle_links = []
 
-            title = page.title()
+    for link in soup.find_all(
+        "a",
+        href=True,
+    ):
+        href = link.get("href", "")
 
-            body_text = page.locator("body").inner_text(
-                timeout=10000
-            )
+        if "auto-occasion-annonce-" in href:
+            vehicle_links.append(href)
 
-            clean_body = normalize_text(body_text)
-            lower_body = clean_body.lower()
+    vehicle_links = list(
+        dict.fromkeys(vehicle_links)
+    )
 
-            blocked_terms = (
-                "access denied",
-                "forbidden",
-                "captcha",
-                "verify you are human",
-                "vérifiez que vous êtes humain",
-            )
+    blocked_terms = (
+        "access denied",
+        "forbidden",
+        "captcha",
+        "please enable js",
+        "verify you are human",
+    )
 
-            blocked = any(
-                term in lower_body
-                for term in blocked_terms
-            )
+    blocked = any(
+        term in lower_text
+        for term in blocked_terms
+    )
 
-            has_brand = "peugeot" in lower_body
-            has_model = "208" in clean_body
-            has_year = "2019" in clean_body
-            has_mileage = (
-                "90000 km" in lower_body
-                or "90 000 km" in lower_body
-            )
-            has_fuel = "essence" in lower_body
-            has_price = (
-                "6 000 €" in clean_body
-                or "6000 €" in clean_body
-            )
+    print("Page title:", page_title[:200])
+    print(
+        "Visible text length:",
+        len(page_text),
+    )
+    print(
+        "Price patterns found:",
+        len(price_matches),
+    )
+    print(
+        "Mileage patterns found:",
+        len(mileage_matches),
+    )
+    print(
+        "Vehicle links found:",
+        len(vehicle_links),
+    )
+    print(
+        "Blocked page detected:",
+        "yes" if blocked else "no",
+    )
 
-            print("Final URL:", page.url)
-            print("Page title:", title)
-            print(
-                "Visible text length:",
-                len(clean_body),
-            )
-            print(
-                "Blocked page detected:",
-                "yes" if blocked else "no",
-            )
+    if (
+        len(page_text) > 1000
+        and len(price_matches) > 0
+        and len(mileage_matches) > 0
+    ):
+        print("Status: OK")
 
-            print(
-                "Brand found:",
-                "yes" if has_brand else "no",
-            )
-            print(
-                "Model found:",
-                "yes" if has_model else "no",
-            )
-            print(
-                "Year found:",
-                "yes" if has_year else "no",
-            )
-            print(
-                "Mileage found:",
-                "yes" if has_mileage else "no",
-            )
-            print(
-                "Fuel found:",
-                "yes" if has_fuel else "no",
-            )
-            print(
-                "Price found:",
-                "yes" if has_price else "no",
-            )
+    elif blocked:
+        print("Status: BLOCKED")
 
-            if (
-                response
-                and response.status == 200
-                and has_brand
-                and has_model
-                and has_year
-                and has_mileage
-                and has_fuel
-                and has_price
-            ):
-                print("Status: OK")
+    else:
+        print("Status: NO_LISTING_DATA")
 
-            elif blocked:
-                print("Status: ACCESS_BLOCKED")
+    print(
+        "Text preview:",
+        page_text[:1500],
+    )
 
-            elif response and response.status == 403:
-                print("Status: HTTP_403")
+    if vehicle_links:
+        print(
+            "First vehicle link:",
+            vehicle_links[0],
+        )
 
-            else:
-                print("Status: PAGE_REACHED_NO_DATA")
-
-            print(
-                "Text preview:",
-                clean_body[:1500],
-            )
-
-        except Exception as error:
-            print("Status: ERROR")
-            print(
-                "Error type:",
-                type(error).__name__,
-            )
-            print("Error:", str(error))
-
-        finally:
-            context.close()
-            browser.close()
-
-    print("=== LEBONCOIN ACCESS TEST END ===")
+    print("=== ZENROWS LACENTRALE TEST END ===")
 
 
 if __name__ == "__main__":
-    run_test()
+    main()
