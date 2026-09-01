@@ -13,6 +13,8 @@ LIST_URL = (
 )
 
 MAX_LOTS_PER_RUN = 20
+DAILY_CREATE_LIMIT = 100
+
 SOURCE_ID = "aab590a1-85f9-41f5-8c0e-0822b12ed776"
 
 PREMIUM_BRANDS = {
@@ -187,6 +189,31 @@ def opportunity_prefilter(parsed):
         return "WATCHLIST", score, reasons
 
     return "FILTERED", score, reasons
+
+
+def get_today_created_count():
+    conn = psycopg2.connect(
+        os.environ["DATABASE_URL"]
+    )
+
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        SELECT COUNT(*)
+        FROM listings
+        WHERE source_id = %s
+          AND created_at >= CURRENT_DATE
+        """,
+        (SOURCE_ID,),
+    )
+
+    count = cur.fetchone()[0]
+
+    cur.close()
+    conn.close()
+
+    return count
 
 
 async def discover_vehicle_lots():
@@ -437,6 +464,28 @@ async def main():
         "=== DOMAINE SCANNER START ==="
     )
 
+    created_today = get_today_created_count()
+
+    print(
+        "Created today:",
+        created_today,
+    )
+
+    print(
+        "Daily create limit:",
+        DAILY_CREATE_LIMIT,
+    )
+
+    if created_today >= DAILY_CREATE_LIMIT:
+        print(
+            "DAILY LIMIT REACHED - scanner stopped"
+        )
+        return
+
+    remaining_daily_slots = (
+        DAILY_CREATE_LIMIT - created_today
+    )
+
     lot_urls = await discover_vehicle_lots()
 
     created = 0
@@ -454,10 +503,12 @@ async def main():
         print(
             "=============================="
         )
+
         print(
             "LOT",
             index,
         )
+
         print(
             "URL:",
             url,
@@ -554,6 +605,19 @@ async def main():
                 == "CREATED"
             ):
                 created += 1
+                remaining_daily_slots -= 1
+
+                print(
+                    "Remaining daily slots:",
+                    remaining_daily_slots,
+                )
+
+                if remaining_daily_slots <= 0:
+                    print(
+                        "DAILY LIMIT REACHED - stopping scan"
+                    )
+                    break
+
             else:
                 skipped += 1
 
@@ -598,6 +662,21 @@ async def main():
     print(
         "Errors:",
         errors,
+    )
+
+    print(
+        "Daily limit:",
+        DAILY_CREATE_LIMIT,
+    )
+
+    print(
+        "Created before this run:",
+        created_today,
+    )
+
+    print(
+        "Created this run:",
+        created,
     )
 
     print(
