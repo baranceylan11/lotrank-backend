@@ -12,7 +12,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-VERSION = "MARKET SOURCE ROUTER V10 FINAL PARSER"
+VERSION = "MARKET SOURCE ROUTER V11 SAFETY LOCK"
 REQUEST_TIMEOUT = 35
 MAX_COMPARABLES_PER_SOURCE = 25
 MIN_COMPARABLES_TO_ACCEPT = 5
@@ -1214,7 +1214,7 @@ def calculate_bid_status(
     lotrank_max: int,
     confidence: int,
 ) -> str:
-    if confidence < 40:
+    if confidence < 60:
         return "LOW_CONFIDENCE"
 
     if lotrank_max <= 0:
