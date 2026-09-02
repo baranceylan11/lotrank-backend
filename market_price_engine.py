@@ -12,7 +12,7 @@ import requests
 from bs4 import BeautifulSoup
 
 
-VERSION = "MARKET SOURCE ROUTER V9 SAFE PROTOTYPE"
+VERSION = "MARKET SOURCE ROUTER V10 FINAL PARSER"
 REQUEST_TIMEOUT = 35
 MAX_COMPARABLES_PER_SOURCE = 25
 MIN_COMPARABLES_TO_ACCEPT = 5
@@ -72,7 +72,11 @@ class Comparable:
 
 
 def clean_text(value: str) -> str:
-    value = value.replace("\u00a0", " ").replace("\u202f", " ")
+    value = (
+        value.replace("\u00a0", " ")
+        .replace("\u202f", " ")
+        .replace("\u2009", " ")
+    )
     return re.sub(r"\s+", " ", value).strip()
 
 
@@ -175,7 +179,6 @@ def load_target_from_database() -> None:
                     """,
                     (TARGET_LISTING_ID,),
                 )
-
             else:
                 cursor.execute(
                     base_select
@@ -199,9 +202,7 @@ def load_target_from_database() -> None:
         connection.close()
 
     if not row:
-        raise RuntimeError(
-            "No active vehicle with price history was found"
-        )
+        raise RuntimeError("No active vehicle with price history was found")
 
     (
         listing_id,
@@ -227,26 +228,17 @@ def load_target_from_database() -> None:
 def build_search_plans() -> List[SearchPlan]:
     strict_margin = max(
         25000,
-        min(
-            50000,
-            round(TARGET_MILEAGE * 0.35),
-        ),
+        min(50000, round(TARGET_MILEAGE * 0.35)),
     )
 
     wide_margin = max(
         50000,
-        min(
-            90000,
-            round(TARGET_MILEAGE * 0.75),
-        ),
+        min(90000, round(TARGET_MILEAGE * 0.75)),
     )
 
     broad_margin = max(
         70000,
-        min(
-            120000,
-            round(TARGET_MILEAGE * 1.00),
-        ),
+        min(120000, round(TARGET_MILEAGE * 1.00)),
     )
 
     return [
@@ -282,9 +274,7 @@ def build_sources(plan: SearchPlan) -> List[dict]:
     model_slug = slugify(TARGET_MODEL)
 
     if not brand_slug or not model_slug:
-        raise RuntimeError(
-            "Brand or model cannot be converted to a search URL"
-        )
+        raise RuntimeError("Brand or model cannot be converted to a search URL")
 
     paruvendu_fuel_map = {
         "ESSENCE": "essence",
@@ -302,13 +292,8 @@ def build_sources(plan: SearchPlan) -> List[dict]:
 
     sources = []
 
-    paruvendu_fuel = paruvendu_fuel_map.get(
-        TARGET_FUEL
-    )
-
-    autoscout_fuel = autoscout_fuel_map.get(
-        TARGET_FUEL
-    )
+    paruvendu_fuel = paruvendu_fuel_map.get(TARGET_FUEL)
+    autoscout_fuel = autoscout_fuel_map.get(TARGET_FUEL)
 
     if paruvendu_fuel:
         sources.append(
@@ -349,17 +334,11 @@ def build_sources(plan: SearchPlan) -> List[dict]:
     return sources
 
 
-def is_reasonable_mileage(
-    year: int,
-    mileage: int,
-) -> bool:
+def is_reasonable_mileage(year: int, mileage: int) -> bool:
     if mileage < 0 or mileage > 500000:
         return False
 
-    vehicle_age = max(
-        0,
-        2026 - year,
-    )
+    vehicle_age = max(0, 2026 - year)
 
     if vehicle_age >= 5 and mileage < 1000:
         return False
@@ -388,41 +367,24 @@ def normalize_comparable_price(
     year: int,
     mileage: int,
 ) -> int:
-    year_adjustment = (
-        TARGET_YEAR - year
-    ) * 0.04
+    year_adjustment = (TARGET_YEAR - year) * 0.04
 
     mileage_adjustment = (
-        (
-            mileage - TARGET_MILEAGE
-        )
-        / 10000.0
+        (mileage - TARGET_MILEAGE) / 10000.0
     ) * 0.015
 
     total_adjustment = max(
         -0.15,
-        min(
-            0.15,
-            year_adjustment + mileage_adjustment,
-        ),
+        min(0.15, year_adjustment + mileage_adjustment),
     )
 
     return max(
         1,
-        int(
-            round(
-                raw_price
-                * (
-                    1.0 + total_adjustment
-                )
-            )
-        ),
+        int(round(raw_price * (1.0 + total_adjustment))),
     )
 
 
-def fetch_html_cached(
-    url: str,
-) -> Optional[str]:
+def fetch_html_cached(url: str) -> Optional[str]:
     if url in FETCH_CACHE:
         print("Fetch cache: HIT")
         return FETCH_CACHE[url]
@@ -441,24 +403,13 @@ def fetch_html_cached(
             type(error).__name__,
             str(error),
         )
-
         FETCH_CACHE[url] = None
         return None
 
-    print(
-        "Direct HTTP status:",
-        response.status_code,
-    )
+    print("Direct HTTP status:", response.status_code)
+    print("Direct response bytes:", len(response.content))
 
-    print(
-        "Direct response bytes:",
-        len(response.content),
-    )
-
-    if (
-        response.status_code != 200
-        or len(response.content) <= 1000
-    ):
+    if response.status_code != 200 or len(response.content) <= 1000:
         FETCH_CACHE[url] = None
         return None
 
@@ -466,20 +417,9 @@ def fetch_html_cached(
     return response.text
 
 
-def html_to_text(
-    html: str,
-) -> str:
-    soup = BeautifulSoup(
-        html,
-        "html.parser",
-    )
-
-    return clean_text(
-        soup.get_text(
-            " ",
-            strip=True,
-        )
-    )
+def html_to_text(html: str) -> str:
+    soup = BeautifulSoup(html, "html.parser")
+    return clean_text(soup.get_text(" ", strip=True))
 
 
 def deduplicate_source_results(
@@ -501,189 +441,231 @@ def deduplicate_source_results(
             seen.add(key)
             unique.append(item)
 
-    return unique[
-        :MAX_COMPARABLES_PER_SOURCE
+    return unique[:MAX_COMPARABLES_PER_SOURCE]
+
+
+def extract_price_values(text: str) -> List[int]:
+    patterns = [
+        r"€\s*(\d{1,3}(?:[ .,'’]\d{3})+|\d{4,6})",
+        r"(\d{1,3}(?:[ .,'’]\d{3})+|\d{4,6})\s*€",
+        r"EUR\s*(\d{1,3}(?:[ .,'’]\d{3})+|\d{4,6})",
+        r"(\d{1,3}(?:[ .,'’]\d{3})+|\d{4,6})\s*EUR",
     ]
 
+    values = []
 
-def parse_card_fields(
-    card_text: str,
-) -> Optional[
-    Tuple[int, int, str, int]
-]:
-    text = clean_text(
-        card_text
+    for pattern in patterns:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            try:
+                value = parse_int(match.group(1))
+            except ValueError:
+                continue
+
+            if 1500 <= value <= 100000:
+                values.append(value)
+
+    return list(dict.fromkeys(values))
+
+
+def extract_mileage_values(text: str) -> List[int]:
+    pattern = re.compile(
+        r"(\d{1,3}(?:[ .,'’]\d{3})+|\d{1,6})\s*km\b",
+        re.IGNORECASE,
     )
 
+    values = []
+
+    for match in pattern.finditer(text):
+        try:
+            value = parse_int(match.group(1))
+        except ValueError:
+            continue
+
+        if 0 <= value <= 500000:
+            values.append(value)
+
+    return list(dict.fromkeys(values))
+
+
+def extract_year_values(text: str) -> List[int]:
+    values = []
+
+    month_year_pattern = re.compile(
+        r"\b(?:0?[1-9]|1[0-2])\s*/\s*(20[0-2]\d)\b"
+    )
+
+    for match in month_year_pattern.finditer(text):
+        values.append(int(match.group(1)))
+
+    standalone_pattern = re.compile(r"\b(20[0-2]\d)\b")
+
+    for match in standalone_pattern.finditer(text):
+        value = int(match.group(1))
+
+        if value not in values:
+            values.append(value)
+
+    return values
+
+
+def extract_fuel_values(text: str) -> List[str]:
+    pattern = re.compile(
+        r"\b("
+        r"Essence|Diesel|Hybride|Hybrid|"
+        r"Electrique|Électrique|Electric"
+        r")\b",
+        re.IGNORECASE,
+    )
+
+    values = []
+
+    for match in pattern.finditer(text):
+        fuel = normalize_fuel(match.group(1))
+
+        if fuel not in values:
+            values.append(fuel)
+
+    return values
+
+
+def parse_autoscout_card_fields(
+    card_text: str,
+    plan: SearchPlan,
+) -> Tuple[Optional[Tuple[int, int, str, int]], str]:
+    text = clean_text(card_text)
     lower_text = text.lower()
 
-    if (
-        TARGET_BRAND.lower()
-        not in lower_text
-        or TARGET_MODEL.lower()
-        not in lower_text
-    ):
-        return None
+    if TARGET_BRAND.lower() not in lower_text:
+        return None, "brand_missing"
 
-    price_matches = re.findall(
-        r"(?:€\s*|EUR\s*|)"
-        r"(\d{1,3}(?:[ .]\d{3})+|\d{4,6})"
-        r"\s*(?:€|EUR)",
-        text,
-        re.IGNORECASE,
+    if TARGET_MODEL.lower() not in lower_text:
+        return None, "model_missing"
+
+    prices = extract_price_values(text)
+    mileages = extract_mileage_values(text)
+    years = extract_year_values(text)
+    fuels = extract_fuel_values(text)
+
+    if not prices:
+        return None, "price_missing"
+
+    if not mileages:
+        return None, "mileage_missing"
+
+    if not years:
+        return None, "year_missing"
+
+    if not fuels:
+        return None, "fuel_missing"
+
+    matching_years = [
+        year
+        for year in years
+        if plan.year_min <= year <= plan.year_max
+    ]
+
+    if not matching_years:
+        return None, "year_outside_plan"
+
+    matching_fuels = [
+        fuel
+        for fuel in fuels
+        if fuel == TARGET_FUEL
+    ]
+
+    if not matching_fuels:
+        return None, "fuel_mismatch"
+
+    year = min(
+        matching_years,
+        key=lambda value: abs(value - TARGET_YEAR),
     )
 
-    mileage_matches = re.findall(
-        r"(\d{1,3}(?:[ .]\d{3})+|\d{1,6})"
-        r"\s*km\b",
-        text,
-        re.IGNORECASE,
+    matching_mileages = [
+        mileage
+        for mileage in mileages
+        if (
+            plan.mileage_min <= mileage <= plan.mileage_max
+            and is_reasonable_mileage(year, mileage)
+        )
+    ]
+
+    if not matching_mileages:
+        return None, "mileage_outside_plan"
+
+    mileage = min(
+        matching_mileages,
+        key=lambda value: abs(value - TARGET_MILEAGE),
     )
 
-    year_matches = re.findall(
-        r"\b(20[0-2]\d)\b",
-        text,
-        re.IGNORECASE,
-    )
+    fuel = matching_fuels[0]
 
-    fuel_matches = re.findall(
-        r"\b("
-        r"Essence|Diesel|Hybride|Electrique|Électrique"
-        r")\b",
-        text,
-        re.IGNORECASE,
-    )
-
-    if (
-        not price_matches
-        or not mileage_matches
-        or not year_matches
-        or not fuel_matches
-    ):
-        return None
-
-    try:
-        prices = [
-            parse_int(value)
-            for value
-            in price_matches
-        ]
-
-        mileages = [
-            parse_int(value)
-            for value
-            in mileage_matches
-        ]
-
-        years = [
-            int(value)
-            for value
-            in year_matches
-        ]
-
-    except ValueError:
-        return None
-
-    prices = [
+    valid_prices = [
         price
-        for price
-        in prices
+        for price in prices
         if 1500 <= price <= 100000
     ]
 
-    mileages = [
-        mileage
-        for mileage
-        in mileages
-        if 0 <= mileage <= 500000
-    ]
+    if not valid_prices:
+        return None, "price_outside_range"
 
-    years = [
-        year
-        for year
-        in years
-        if 2000 <= year <= 2026
-    ]
+    price = valid_prices[0]
 
-    if (
-        not prices
-        or not mileages
-        or not years
+    if not is_valid_comparable(
+        year,
+        mileage,
+        fuel,
+        price,
+        plan,
     ):
-        return None
-
-    price = prices[0]
-    mileage = mileages[0]
-
-    year = min(
-        years,
-        key=lambda value: abs(
-            value - TARGET_YEAR
-        ),
-    )
-
-    fuel = normalize_fuel(
-        fuel_matches[0]
-    )
+        return None, "final_validation_failed"
 
     return (
         year,
         mileage,
         fuel,
         price,
-    )
+    ), "ok"
 
 
 def extract_autoscout_cards(
     soup: BeautifulSoup,
 ) -> List[str]:
     candidates = []
+    seen_text = set()
 
     selectors = [
         "article",
         '[data-testid*="list-item"]',
         '[data-testid*="listing"]',
+        '[data-testid*="search-result"]',
         '[class*="ListItem"]',
         '[class*="list-item"]',
         '[class*="listing"]',
+        '[class*="result"]',
     ]
 
-    seen_text = set()
-
     for selector in selectors:
-        for node in soup.select(
-            selector
-        ):
+        for node in soup.select(selector):
             text = clean_text(
-                node.get_text(
-                    " ",
-                    strip=True,
-                )
+                node.get_text(" ", strip=True)
             )
 
-            if (
-                len(text) < 80
-                or len(text) > 3500
-            ):
+            if len(text) < 60 or len(text) > 4000:
                 continue
 
             lower_text = text.lower()
 
-            if (
-                TARGET_BRAND.lower()
-                not in lower_text
-                or TARGET_MODEL.lower()
-                not in lower_text
-            ):
+            if TARGET_BRAND.lower() not in lower_text:
+                continue
+
+            if TARGET_MODEL.lower() not in lower_text:
                 continue
 
             if "km" not in lower_text:
                 continue
 
-            if (
-                "€" not in text
-                and "eur" not in lower_text
-            ):
+            if "€" not in text and "eur" not in lower_text:
                 continue
 
             if text in seen_text:
@@ -699,9 +681,7 @@ def extract_paruvendu_comparables(
     html: str,
     plan: SearchPlan,
 ) -> List[Comparable]:
-    text = html_to_text(
-        html
-    )
+    text = html_to_text(html)
 
     identity = (
         re.escape(TARGET_BRAND)
@@ -713,17 +693,17 @@ def extract_paruvendu_comparables(
         re.compile(
             identity
             + r".{0,400}?\b(20\d{2})\b"
-            + r".{0,220}?(\d{1,3}(?:[ .]\d{3})+|\d{4,6})\s*(?:KM|KMS)\b"
+            + r".{0,220}?(\d{1,3}(?:[ .,'’]\d{3})+|\d{4,6})\s*(?:KM|KMS)\b"
             + r".{0,180}?(ESSENCE|DIESEL|HYBRIDE|ELECTRIQUE|ÉLECTRIQUE)"
-            + r".{0,220}?(\d{1,3}(?:[ .]\d{3})+|\d{3,6})\s*€",
+            + r".{0,220}?(\d{1,3}(?:[ .,'’]\d{3})+|\d{3,6})\s*€",
             re.IGNORECASE,
         ),
         re.compile(
-            r"(\d{1,3}(?:[ .]\d{3})+|\d{3,6})\s*€"
+            r"(\d{1,3}(?:[ .,'’]\d{3})+|\d{3,6})\s*€"
             + r".{0,350}?"
             + identity
             + r".{0,350}?\b(20\d{2})\b"
-            + r".{0,220}?(\d{1,3}(?:[ .]\d{3})+|\d{4,6})\s*(?:KM|KMS)\b"
+            + r".{0,220}?(\d{1,3}(?:[ .,'’]\d{3})+|\d{4,6})\s*(?:KM|KMS)\b"
             + r".{0,180}?(ESSENCE|DIESEL|HYBRIDE|ELECTRIQUE|ÉLECTRIQUE)",
             re.IGNORECASE,
         ),
@@ -731,51 +711,21 @@ def extract_paruvendu_comparables(
 
     results = []
 
-    for pattern_index, pattern in enumerate(
-        patterns
-    ):
-        for match in pattern.finditer(
-            text
-        ):
+    for pattern_index, pattern in enumerate(patterns):
+        for match in pattern.finditer(text):
             try:
                 if pattern_index == 0:
-                    year = int(
-                        match.group(1)
-                    )
-
-                    mileage = parse_int(
-                        match.group(2)
-                    )
-
-                    fuel = normalize_fuel(
-                        match.group(3)
-                    )
-
-                    price = parse_int(
-                        match.group(4)
-                    )
-
+                    year = int(match.group(1))
+                    mileage = parse_int(match.group(2))
+                    fuel = normalize_fuel(match.group(3))
+                    price = parse_int(match.group(4))
                 else:
-                    price = parse_int(
-                        match.group(1)
-                    )
+                    price = parse_int(match.group(1))
+                    year = int(match.group(2))
+                    mileage = parse_int(match.group(3))
+                    fuel = normalize_fuel(match.group(4))
 
-                    year = int(
-                        match.group(2)
-                    )
-
-                    mileage = parse_int(
-                        match.group(3)
-                    )
-
-                    fuel = normalize_fuel(
-                        match.group(4)
-                    )
-
-            except (
-                ValueError,
-                IndexError,
-            ):
+            except (ValueError, IndexError):
                 continue
 
             if is_valid_comparable(
@@ -801,72 +751,68 @@ def extract_paruvendu_comparables(
                     )
                 )
 
-    return deduplicate_source_results(
-        results
-    )
+    return deduplicate_source_results(results)
 
 
 def extract_autoscout24_comparables(
     html: str,
     plan: SearchPlan,
 ) -> List[Comparable]:
-    soup = BeautifulSoup(
-        html,
-        "html.parser",
-    )
-
-    results = []
-
-    cards = extract_autoscout_cards(
-        soup
-    )
+    soup = BeautifulSoup(html, "html.parser")
+    cards = extract_autoscout_cards(soup)
 
     print(
         "AutoScout candidate cards:",
         len(cards),
     )
 
+    results = []
+    rejection_counts: Dict[str, int] = {}
+
     for card_text in cards:
-        parsed = parse_card_fields(
-            card_text
+        parsed, reason = parse_autoscout_card_fields(
+            card_text,
+            plan,
         )
 
         if not parsed:
+            rejection_counts[reason] = (
+                rejection_counts.get(reason, 0) + 1
+            )
             continue
 
-        (
-            year,
-            mileage,
-            fuel,
-            price,
-        ) = parsed
+        year, mileage, fuel, price = parsed
 
-        if is_valid_comparable(
-            year,
-            mileage,
-            fuel,
-            price,
-            plan,
-        ):
-            results.append(
-                Comparable(
-                    "AUTOSCOUT24",
+        results.append(
+            Comparable(
+                "AUTOSCOUT24",
+                year,
+                mileage,
+                fuel,
+                price,
+                normalize_comparable_price(
+                    price,
                     year,
                     mileage,
-                    fuel,
-                    price,
-                    normalize_comparable_price(
-                        price,
-                        year,
-                        mileage,
-                    ),
-                    plan.name,
-                )
+                ),
+                plan.name,
             )
+        )
 
-    return deduplicate_source_results(
-        results
-    )
+    if rejection_counts:
+        summary = ", ".join(
+            f"{reason}={count}"
+            for reason, count in sorted(rejection_counts.items())
+        )
+
+        print(
+            "AutoScout rejected cards:",
+            summary,
+        )
+    else:
+        print("AutoScout rejected cards: 0")
+
+    return deduplicate_source_results(results)
 
 
 def extract_comparables(
@@ -891,10 +837,7 @@ def extract_comparables(
 
 def remove_cross_source_duplicates(
     items: List[Comparable],
-) -> Tuple[
-    List[Comparable],
-    int,
-]:
+) -> Tuple[List[Comparable], int]:
     kept = []
     removed = 0
 
@@ -902,96 +845,60 @@ def remove_cross_source_duplicates(
         duplicate_found = False
 
         for existing in kept:
-            if (
-                candidate.source
-                == existing.source
-            ):
+            if candidate.source == existing.source:
                 continue
 
             if (
-                candidate.year
-                == existing.year
-                and candidate.fuel
-                == existing.fuel
+                candidate.year == existing.year
+                and candidate.fuel == existing.fuel
                 and abs(
-                    candidate.mileage
-                    - existing.mileage
-                )
-                <= DUPLICATE_MILEAGE_TOLERANCE
+                    candidate.mileage - existing.mileage
+                ) <= DUPLICATE_MILEAGE_TOLERANCE
                 and abs(
-                    candidate.raw_price
-                    - existing.raw_price
-                )
-                <= DUPLICATE_PRICE_TOLERANCE
+                    candidate.raw_price - existing.raw_price
+                ) <= DUPLICATE_PRICE_TOLERANCE
             ):
                 duplicate_found = True
                 removed += 1
                 break
 
         if not duplicate_found:
-            kept.append(
-                candidate
-            )
+            kept.append(candidate)
 
-    return (
-        kept,
-        removed,
-    )
+    return kept, removed
 
 
 def remove_price_outliers(
     items: List[Comparable],
-) -> Tuple[
-    List[Comparable],
-    int,
-]:
+) -> Tuple[List[Comparable], int]:
     if len(items) < 5:
-        return (
-            items,
-            0,
-        )
+        return items, 0
 
     prices = [
         item.adjusted_price
-        for item
-        in items
+        for item in items
     ]
 
-    median_price = statistics.median(
-        prices
-    )
+    median_price = statistics.median(prices)
 
     deviations = [
-        abs(
-            price - median_price
-        )
-        for price
-        in prices
+        abs(price - median_price)
+        for price in prices
     ]
 
-    mad = statistics.median(
-        deviations
-    )
+    mad = statistics.median(deviations)
 
     if mad <= 0:
-        return (
-            items,
-            0,
-        )
+        return items, 0
 
     filtered = [
         item
-        for item
-        in items
+        for item in items
         if (
             0.6745
-            * abs(
-                item.adjusted_price
-                - median_price
-            )
+            * abs(item.adjusted_price - median_price)
             / mad
-        )
-        <= 3.5
+        ) <= 3.5
     ]
 
     return (
@@ -1007,48 +914,28 @@ def percentile(
     if not values:
         return 0.0
 
-    ordered = sorted(
-        values
-    )
+    ordered = sorted(values)
 
     if len(ordered) == 1:
-        return float(
-            ordered[0]
-        )
+        return float(ordered[0])
 
     position = (
         len(ordered) - 1
     ) * fraction
 
-    lower_index = math.floor(
-        position
-    )
-
-    upper_index = math.ceil(
-        position
-    )
+    lower_index = math.floor(position)
+    upper_index = math.ceil(position)
 
     if lower_index == upper_index:
-        return float(
-            ordered[lower_index]
-        )
+        return float(ordered[lower_index])
 
-    lower_value = ordered[
-        lower_index
-    ]
-
-    upper_value = ordered[
-        upper_index
-    ]
+    lower_value = ordered[lower_index]
+    upper_value = ordered[upper_index]
 
     return (
         lower_value
-        + (
-            upper_value - lower_value
-        )
-        * (
-            position - lower_index
-        )
+        + (upper_value - lower_value)
+        * (position - lower_index)
     )
 
 
@@ -1056,92 +943,57 @@ def calculate_robust_market_spread(
     items: List[Comparable],
     center_price: int,
 ) -> float:
-    if (
-        not items
-        or center_price <= 0
-    ):
+    if not items or center_price <= 0:
         return 1.0
 
     prices = [
         item.adjusted_price
-        for item
-        in items
+        for item in items
     ]
 
-    p10 = percentile(
-        prices,
-        0.10,
-    )
-
-    p90 = percentile(
-        prices,
-        0.90,
-    )
+    p10 = percentile(prices, 0.10)
+    p90 = percentile(prices, 0.90)
 
     if p90 < p10:
         return 1.0
 
-    return (
-        p90 - p10
-    ) / center_price
+    return (p90 - p10) / center_price
 
 
 def calculate_source_weighted_market_price(
     items: List[Comparable],
-) -> Tuple[
-    int,
-    Dict[str, float],
-]:
+) -> Tuple[int, Dict[str, float]]:
     if not items:
-        return (
-            0,
-            {},
-        )
+        return 0, {}
 
-    groups: Dict[
-        str,
-        List[Comparable],
-    ] = {}
+    groups: Dict[str, List[Comparable]] = {}
 
     for item in items:
         groups.setdefault(
             item.source,
             [],
-        ).append(
-            item
-        )
+        ).append(item)
 
     values = []
-
-    weights: Dict[
-        str,
-        float,
-    ] = {}
+    weights: Dict[str, float] = {}
 
     for source, source_items in groups.items():
         source_median = int(
             statistics.median(
                 [
                     item.adjusted_price
-                    for item
-                    in source_items
+                    for item in source_items
                 ]
             )
         )
 
         sample_factor = min(
             1.0,
-            math.sqrt(
-                len(source_items)
-            )
-            / 5.0,
+            math.sqrt(len(source_items)) / 5.0,
         )
 
         weight = (
-            SOURCE_TRUST.get(
-                source,
-                0.75,
-            )
+            SOURCE_TRUST.get(source, 0.75)
             * sample_factor
         )
 
@@ -1156,8 +1008,7 @@ def calculate_source_weighted_market_price(
 
     total_weight = sum(
         weight
-        for _, weight
-        in values
+        for _, weight in values
     )
 
     if total_weight <= 0:
@@ -1166,8 +1017,7 @@ def calculate_source_weighted_market_price(
                 statistics.median(
                     [
                         item.adjusted_price
-                        for item
-                        in items
+                        for item in items
                     ]
                 )
             ),
@@ -1178,17 +1028,13 @@ def calculate_source_weighted_market_price(
         round(
             sum(
                 price * weight
-                for price, weight
-                in values
+                for price, weight in values
             )
             / total_weight
         )
     )
 
-    return (
-        weighted_market_price,
-        weights,
-    )
+    return weighted_market_price, weights
 
 
 def calculate_confidence(
@@ -1209,22 +1055,17 @@ def calculate_confidence(
         len(
             {
                 item.source
-                for item
-                in items
+                for item in items
             }
-        )
-        * 15,
+        ) * 15,
     )
 
     if robust_spread <= 0.20:
         spread_score = 20
-
     elif robust_spread <= 0.35:
         spread_score = 15
-
     elif robust_spread <= 0.50:
         spread_score = 10
-
     else:
         spread_score = 5
 
@@ -1237,10 +1078,7 @@ def calculate_confidence(
 
     return max(
         0,
-        min(
-            100,
-            int(confidence),
-        ),
+        min(100, int(confidence)),
     )
 
 
@@ -1257,26 +1095,20 @@ def calculate_market_haircut(
 
     if selected_stage == "WIDE_MILEAGE":
         haircut += 0.03
-
     elif selected_stage == "YEAR_FALLBACK":
         haircut += 0.06
 
     if confidence < 60:
         haircut += 0.03
-
     elif confidence < 70:
         haircut += 0.02
 
     if robust_spread > 0.50:
         haircut += 0.03
-
     elif robust_spread > 0.35:
         haircut += 0.02
 
-    return min(
-        0.15,
-        haircut,
-    )
+    return min(0.15, haircut)
 
 
 def calculate_dynamic_costs(
@@ -1299,37 +1131,28 @@ def calculate_dynamic_costs(
 
     if confidence < 60:
         risk_reserve += 700
-
     elif confidence < 70:
         risk_reserve += 500
-
     elif confidence < 80:
         risk_reserve += 350
-
     elif confidence < 90:
         risk_reserve += 150
 
     if robust_spread > 0.50:
         risk_reserve += 200
-
     elif robust_spread > 0.35:
         risk_reserve += 100
 
     if safe_sale_value < 7000:
         profit_rate = 0.16
-
     elif safe_sale_value < 15000:
         profit_rate = 0.18
-
     else:
         profit_rate = 0.20
 
     target_profit = max(
         1200,
-        round(
-            safe_sale_value
-            * profit_rate
-        ),
+        round(safe_sale_value * profit_rate),
     )
 
     return {
@@ -1359,10 +1182,7 @@ def calculate_lotrank_max(
         + costs["risk_reserve"]
     )
 
-    available = (
-        safe_sale_value
-        - fixed_costs
-    )
+    available = safe_sale_value - fixed_costs
 
     if available <= 0:
         return 0
@@ -1371,9 +1191,7 @@ def calculate_lotrank_max(
         0,
         math.floor(
             available
-            / (
-                1 + AUCTION_FEE_RATE
-            )
+            / (1 + AUCTION_FEE_RATE)
         ),
     )
 
@@ -1384,10 +1202,7 @@ def calculate_acquisition_cost(
 ) -> int:
     return (
         bid
-        + round(
-            bid
-            * AUCTION_FEE_RATE
-        )
+        + round(bid * AUCTION_FEE_RATE)
         + costs["transport_cost"]
         + costs["repair_reserve"]
         + costs["other_cost"]
@@ -1405,17 +1220,12 @@ def calculate_bid_status(
     if lotrank_max <= 0:
         return "AVOID"
 
-    remaining = (
-        lotrank_max
-        - current_bid
-    )
+    remaining = lotrank_max - current_bid
 
     if remaining < 0:
         return "MAX_EXCEEDED"
 
-    if remaining <= (
-        lotrank_max * 0.05
-    ):
+    if remaining <= lotrank_max * 0.05:
         return "NEAR_MAX"
 
     return "BID_ROOM_AVAILABLE"
@@ -1424,10 +1234,7 @@ def calculate_bid_status(
 def process_source(
     source: dict,
     plan: SearchPlan,
-) -> Tuple[
-    List[Comparable],
-    bool,
-]:
+) -> Tuple[List[Comparable], bool]:
     name = source["name"]
     url = source["url"]
 
@@ -1440,29 +1247,17 @@ def process_source(
         urlparse(url).netloc,
     )
 
-    html = fetch_html_cached(
-        url
-    )
+    html = fetch_html_cached(url)
 
     if html is None:
-        print(
-            "Source status: UNAVAILABLE"
-        )
+        print("Source status: UNAVAILABLE")
+        return [], False
 
-        return (
-            [],
-            False,
-        )
-
-    print(
-        "Fetch method: DIRECT_OR_CACHE"
-    )
+    print("Fetch method: DIRECT_OR_CACHE")
 
     print(
         "Visible text length:",
-        len(
-            html_to_text(html)
-        ),
+        len(html_to_text(html)),
     )
 
     comparables = extract_comparables(
@@ -1477,9 +1272,7 @@ def process_source(
     )
 
     if comparables:
-        print(
-            "Source status: OK"
-        )
+        print("Source status: OK")
 
         for item in comparables[:8]:
             print(
@@ -1491,35 +1284,20 @@ def process_source(
                 f"adjusted {item.adjusted_price} EUR"
             )
 
-        return (
-            comparables,
-            True,
-        )
+        return comparables, True
 
     print(
         "Source status: REACHED_NO_COMPARABLES"
     )
 
-    return (
-        [],
-        True,
-    )
+    return [], True
 
 
 def run_search_plan(
     plan: SearchPlan,
-) -> Tuple[
-    List[Comparable],
-    int,
-]:
-    print(
-        "===== ADAPTIVE SEARCH PLAN ====="
-    )
-
-    print(
-        "Stage:",
-        plan.name,
-    )
+) -> Tuple[List[Comparable], int]:
+    print("===== ADAPTIVE SEARCH PLAN =====")
+    print("Stage:", plan.name)
 
     print(
         "Year range:",
@@ -1547,13 +1325,8 @@ def run_search_plan(
     all_comparables = []
     reached_sources = 0
 
-    for source in build_sources(
-        plan
-    ):
-        (
-            comparables,
-            reached,
-        ) = process_source(
+    for source in build_sources(plan):
+        comparables, reached = process_source(
             source,
             plan,
         )
@@ -1561,14 +1334,9 @@ def run_search_plan(
         if reached:
             reached_sources += 1
 
-        all_comparables.extend(
-            comparables
-        )
+        all_comparables.extend(comparables)
 
-    return (
-        all_comparables,
-        reached_sources,
-    )
+    return all_comparables, reached_sources
 
 
 def main() -> None:
@@ -1576,17 +1344,9 @@ def main() -> None:
         f"=== {VERSION} START ==="
     )
 
-    print(
-        "Database target mode: enabled"
-    )
-
-    print(
-        "Database writes: no"
-    )
-
-    print(
-        "Paid proxy fallback: disabled"
-    )
+    print("Database target mode: enabled")
+    print("Database writes: no")
+    print("Paid proxy fallback: disabled")
 
     load_target_from_database()
 
@@ -1626,32 +1386,25 @@ def main() -> None:
         CURRENT_AUCTION_BID,
     )
 
-    selected_plan: Optional[
-        SearchPlan
-    ] = None
-
-    selected_comparables: List[
-        Comparable
-    ] = []
-
+    selected_plan: Optional[SearchPlan] = None
+    selected_comparables: List[Comparable] = []
     selected_reached_sources = 0
 
-    best_plan: Optional[
-        SearchPlan
-    ] = None
-
-    best_comparables: List[
-        Comparable
-    ] = []
-
+    best_plan: Optional[SearchPlan] = None
+    best_comparables: List[Comparable] = []
     best_reached_sources = 0
+
+    overall_reached_sources = 0
 
     for plan in build_search_plans():
         (
             plan_comparables,
             plan_reached_sources,
-        ) = run_search_plan(
-            plan
+        ) = run_search_plan(plan)
+
+        overall_reached_sources = max(
+            overall_reached_sources,
+            plan_reached_sources,
         )
 
         if (
@@ -1659,21 +1412,25 @@ def main() -> None:
             > len(best_comparables)
         ):
             best_plan = plan
-            best_comparables = (
-                plan_comparables
-            )
-            best_reached_sources = (
-                plan_reached_sources
-            )
+            best_comparables = plan_comparables
+            best_reached_sources = plan_reached_sources
+
+        elif (
+            len(plan_comparables)
+            == len(best_comparables)
+            and plan_reached_sources
+            > best_reached_sources
+        ):
+            best_plan = plan
+            best_comparables = plan_comparables
+            best_reached_sources = plan_reached_sources
 
         if (
             len(plan_comparables)
             >= MIN_COMPARABLES_TO_ACCEPT
         ):
             selected_plan = plan
-            selected_comparables = (
-                plan_comparables
-            )
+            selected_comparables = plan_comparables
             selected_reached_sources = (
                 plan_reached_sources
             )
@@ -1692,9 +1449,7 @@ def main() -> None:
         and best_comparables
     ):
         selected_plan = best_plan
-        selected_comparables = (
-            best_comparables
-        )
+        selected_comparables = best_comparables
         selected_reached_sources = (
             best_reached_sources
         )
@@ -1706,26 +1461,16 @@ def main() -> None:
         )
 
     if selected_plan is None:
-        print(
-            "===== ROUTER SUMMARY ====="
-        )
+        print("===== ROUTER SUMMARY =====")
 
         print(
             "Sources reached:",
-            best_reached_sources,
+            overall_reached_sources,
         )
 
-        print(
-            "Sources with comparables: 0"
-        )
-
-        print(
-            "Raw comparables: 0"
-        )
-
-        print(
-            "Status: NO_MARKET_DATA"
-        )
+        print("Sources with comparables: 0")
+        print("Raw comparables: 0")
+        print("Status: NO_MARKET_DATA")
 
         print(
             "===== ROUTER SUMMARY END ====="
@@ -1734,7 +1479,6 @@ def main() -> None:
         print(
             f"=== {VERSION} END ==="
         )
-
         return
 
     print(
@@ -1790,9 +1534,7 @@ def main() -> None:
         cross_source_unique
     )
 
-    print(
-        "===== DUPLICATE FILTER ====="
-    )
+    print("===== DUPLICATE FILTER =====")
 
     print(
         "Exact unique comparables:",
@@ -1818,9 +1560,7 @@ def main() -> None:
         "===== DUPLICATE FILTER END ====="
     )
 
-    print(
-        "===== OUTLIER FILTER ====="
-    )
+    print("===== OUTLIER FILTER =====")
 
     print(
         "Outliers removed:",
@@ -1841,15 +1581,12 @@ def main() -> None:
         "===== OUTLIER FILTER END ====="
     )
 
-    print(
-        "===== ROUTER SUMMARY ====="
-    )
+    print("===== ROUTER SUMMARY =====")
 
     source_names = sorted(
         {
             item.source
-            for item
-            in filtered
+            for item in filtered
         }
     )
 
@@ -1869,9 +1606,7 @@ def main() -> None:
     )
 
     if not filtered:
-        print(
-            "Status: NO_MARKET_DATA"
-        )
+        print("Status: NO_MARKET_DATA")
 
         print(
             "===== ROUTER SUMMARY END ====="
@@ -1880,19 +1615,16 @@ def main() -> None:
         print(
             f"=== {VERSION} END ==="
         )
-
         return
 
     raw_prices = sorted(
         item.raw_price
-        for item
-        in filtered
+        for item in filtered
     )
 
     adjusted_prices = sorted(
         item.adjusted_price
-        for item
-        in filtered
+        for item in filtered
     )
 
     (
@@ -1925,16 +1657,12 @@ def main() -> None:
         int(
             round(
                 weighted_market_price
-                * (
-                    1.0 - market_haircut
-                )
+                * (1.0 - market_haircut)
             )
         ),
     )
 
-    print(
-        "Status: OK"
-    )
+    print("Status: OK")
 
     print(
         "Selected search stage:",
@@ -1948,11 +1676,7 @@ def main() -> None:
 
     print(
         "Raw median market price:",
-        int(
-            statistics.median(
-                raw_prices
-            )
-        ),
+        int(statistics.median(raw_prices)),
     )
 
     print(
@@ -1989,8 +1713,7 @@ def main() -> None:
         int(
             statistics.mean(
                 item.mileage
-                for item
-                in filtered
+                for item in filtered
             )
         ),
     )
