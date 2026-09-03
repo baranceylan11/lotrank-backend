@@ -1,10 +1,8 @@
 import hmac
 import os
 import psycopg2
-import smtplib
-import ssl
+import requests
 from dataclasses import dataclass
-from email.message import EmailMessage
 from email.utils import parseaddr
 
 from fastapi import FastAPI, Header, HTTPException
@@ -18,18 +16,15 @@ app = FastAPI(title="LotRank Backend")
 SAFE_MAIL_ERROR_CODES = frozenset({
     "invalid_token",
     "missing_env",
-    "smtp_auth_failed",
-    "smtp_connect_failed",
-    "smtp_send_failed",
+    "resend_auth_failed",
+    "resend_connect_failed",
+    "resend_send_failed",
 })
 
 
 @dataclass(frozen=True)
-class MailSettings:
-    host: str
-    port: int
-    user: str
-    password: str
+class ResendSettings:
+    api_key: str
     from_value: str
     from_address: str
     admin_email: str
@@ -45,23 +40,13 @@ class MailDeliveryError(Exception):
         super().__init__(code)
 
 
-def _load_mail_settings():
+def _load_resend_settings():
     values = {
-        "host": os.getenv("MAIL_HOST", "").strip(),
-        "port": os.getenv("MAIL_PORT", "").strip(),
-        "user": os.getenv("MAIL_USER", "").strip(),
-        "password": os.getenv("MAIL_PASSWORD", ""),
+        "api_key": os.getenv("RESEND_API_KEY", ""),
         "from_value": os.getenv("MAIL_FROM", "").strip(),
         "admin_email": os.getenv("ADMIN_REPORT_EMAIL", "").strip(),
     }
     if not all(values.values()):
-        raise MailConfigurationError
-
-    try:
-        port = int(values["port"])
-    except ValueError:
-        raise MailConfigurationError from None
-    if not 1 <= port <= 65535:
         raise MailConfigurationError
 
     from_address = parseaddr(values["from_value"])[1].lower()
@@ -69,11 +54,8 @@ def _load_mail_settings():
     if from_address != "info@lotrank.ai" or not admin_email:
         raise MailConfigurationError
 
-    return MailSettings(
-        host=values["host"],
-        port=port,
-        user=values["user"],
-        password=values["password"],
+    return ResendSettings(
+        api_key=values["api_key"],
         from_value=values["from_value"],
         from_address=from_address,
         admin_email=admin_email,
@@ -90,53 +72,32 @@ def _mail_test_token_is_valid(provided_token):
     )
 
 
-def _send_smtp_test_email():
-    settings = _load_mail_settings()
-    message = EmailMessage()
-    message["From"] = settings.from_value
-    message["To"] = settings.admin_email
-    message["Subject"] = "LotRank SMTP test başarılı"
-    message.set_content("LotRank SMTP bağlantısı başarıyla doğrulandı.")
-
-    context = ssl.create_default_context()
-    smtp_class = smtplib.SMTP_SSL if settings.port == 465 else smtplib.SMTP
-    smtp_kwargs = {"host": settings.host, "port": settings.port, "timeout": 15}
-    if settings.port == 465:
-        smtp_kwargs["context"] = context
-
-    server = None
+def _send_resend_test_email():
+    settings = _load_resend_settings()
     try:
-        try:
-            server = smtp_class(**smtp_kwargs)
-            if settings.port != 465:
-                server.starttls(context=context)
-        except (smtplib.SMTPException, OSError):
-            raise MailDeliveryError("smtp_connect_failed") from None
+        response = requests.post(
+            "https://api.resend.com/emails",
+            headers={
+                "Authorization": f"Bearer {settings.api_key}",
+                "Accept": "application/json",
+            },
+            json={
+                "from": settings.from_value,
+                "to": [settings.admin_email],
+                "subject": "LotRank SMTP test başarılı",
+                "text": "LotRank mail bağlantısı başarıyla doğrulandı.",
+            },
+            timeout=15,
+        )
+    except (requests.Timeout, requests.ConnectionError):
+        raise MailDeliveryError("resend_connect_failed") from None
+    except requests.RequestException:
+        raise MailDeliveryError("resend_send_failed") from None
 
-        try:
-            server.login(settings.user, settings.password)
-        except smtplib.SMTPAuthenticationError:
-            raise MailDeliveryError("smtp_auth_failed") from None
-        except (smtplib.SMTPException, OSError):
-            raise MailDeliveryError("smtp_connect_failed") from None
-
-        try:
-            server.send_message(
-                message,
-                from_addr=settings.from_address,
-                to_addrs=[settings.admin_email],
-            )
-        except (smtplib.SMTPException, OSError):
-            raise MailDeliveryError("smtp_send_failed") from None
-    finally:
-        if server is not None:
-            try:
-                server.quit()
-            except Exception:
-                try:
-                    server.close()
-                except Exception:
-                    pass
+    if response.status_code in (401, 403):
+        raise MailDeliveryError("resend_auth_failed")
+    if not 200 <= response.status_code < 300:
+        raise MailDeliveryError("resend_send_failed")
 
 
 # =========================================================
@@ -166,23 +127,23 @@ async def send_mail_test(
         raise HTTPException(status_code=401, detail={"code": "invalid_token"})
 
     try:
-        await run_in_threadpool(_send_smtp_test_email)
+        await run_in_threadpool(_send_resend_test_email)
     except MailConfigurationError:
         raise HTTPException(status_code=503, detail={"code": "missing_env"}) from None
     except MailDeliveryError as error:
         safe_code = (
             error.code
             if error.code in SAFE_MAIL_ERROR_CODES
-            else "smtp_send_failed"
+            else "resend_send_failed"
         )
         raise HTTPException(status_code=502, detail={"code": safe_code}) from None
     except Exception:
         raise HTTPException(
             status_code=502,
-            detail={"code": "smtp_send_failed"},
+            detail={"code": "resend_send_failed"},
         ) from None
 
-    return {"status": "ok", "message": "SMTP test email sent"}
+    return {"status": "ok", "message": "Resend test email sent"}
 
 
 @app.get(
@@ -207,7 +168,7 @@ def mail_test_page():
   </style>
 </head>
 <body>
-  <h1>LotRank SMTP testi</h1>
+  <h1>LotRank mail testi</h1>
   <form id="mail-test-form" action="/internal/mail/test" method="post">
     <label for="mail-test-token">MAIL_TEST_TOKEN</label>
     <input id="mail-test-token" type="password" required autocomplete="off" spellcheck="false">
@@ -222,9 +183,9 @@ def mail_test_page():
     const safeErrorCodes = new Set([
       "invalid_token",
       "missing_env",
-      "smtp_auth_failed",
-      "smtp_connect_failed",
-      "smtp_send_failed"
+      "resend_auth_failed",
+      "resend_connect_failed",
+      "resend_send_failed"
     ]);
 
     form.addEventListener("submit", async (event) => {
@@ -245,7 +206,7 @@ def mail_test_page():
         if (response.ok) {
           status.textContent = "Mail gönderildi";
         } else {
-          let code = "smtp_send_failed";
+          let code = "resend_send_failed";
           try {
             const payload = await response.json();
             const candidate = payload && payload.detail && payload.detail.code;
@@ -254,7 +215,7 @@ def mail_test_page():
           status.textContent = `Test maili gönderilemedi: ${code}`;
         }
       } catch {
-        status.textContent = "Test maili gönderilemedi: smtp_connect_failed";
+        status.textContent = "Test maili gönderilemedi: resend_connect_failed";
       } finally {
         token = "";
         submitButton.disabled = false;
