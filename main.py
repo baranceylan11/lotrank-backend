@@ -8,6 +8,7 @@ from email.message import EmailMessage
 from email.utils import parseaddr
 
 from fastapi import FastAPI, Header, HTTPException
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 
@@ -128,6 +129,83 @@ async def send_mail_test(
         raise HTTPException(status_code=502, detail="SMTP test failed") from None
 
     return {"status": "ok", "message": "SMTP test email sent"}
+
+
+@app.get(
+    "/internal/mail/test-page",
+    response_class=HTMLResponse,
+    include_in_schema=False,
+)
+def mail_test_page():
+    content = """<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LotRank mail testi</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 420px; margin: 64px auto; padding: 0 20px; }
+    form { display: grid; gap: 14px; }
+    label { font-weight: 700; }
+    input, button { min-height: 44px; padding: 0 12px; font: inherit; }
+    button { cursor: pointer; }
+    #status { min-height: 24px; }
+  </style>
+</head>
+<body>
+  <h1>LotRank SMTP testi</h1>
+  <form id="mail-test-form" action="/internal/mail/test" method="post">
+    <label for="mail-test-token">MAIL_TEST_TOKEN</label>
+    <input id="mail-test-token" type="password" required autocomplete="off" spellcheck="false">
+    <button id="submit-button" type="submit">Test maili gönder</button>
+    <p id="status" role="status" aria-live="polite"></p>
+  </form>
+  <script>
+    const form = document.getElementById("mail-test-form");
+    const tokenField = document.getElementById("mail-test-token");
+    const submitButton = document.getElementById("submit-button");
+    const status = document.getElementById("status");
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      let token = tokenField.value;
+      tokenField.value = "";
+      submitButton.disabled = true;
+      status.textContent = "Gönderiliyor…";
+
+      try {
+        const response = await fetch(form.action, {
+          method: "POST",
+          headers: { "X-Mail-Test-Token": token, "Accept": "application/json" },
+          credentials: "same-origin",
+          cache: "no-store",
+          referrerPolicy: "no-referrer"
+        });
+        status.textContent = response.ok ? "Mail gönderildi" : "Test maili gönderilemedi";
+      } catch {
+        status.textContent = "Test maili gönderilemedi";
+      } finally {
+        token = "";
+        submitButton.disabled = false;
+        tokenField.focus();
+      }
+    });
+  </script>
+</body>
+</html>"""
+    return HTMLResponse(
+        content=content,
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "X-Content-Type-Options": "nosniff",
+            "Content-Security-Policy": (
+                "default-src 'none'; style-src 'unsafe-inline'; "
+                "script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; "
+                "base-uri 'none'; frame-ancestors 'none'"
+            ),
+        },
+    )
 
 
 # =========================================================

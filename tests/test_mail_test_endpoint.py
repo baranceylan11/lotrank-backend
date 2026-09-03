@@ -15,7 +15,7 @@ MAIL_ENV = {
     "MAIL_PASSWORD": "smtp-secret",
     "MAIL_FROM": "LotRank <info@lotrank.ai>",
     "ADMIN_REPORT_EMAIL": "admin@example.com",
-    "MAIL_TEST_TOKEN": "test-token",
+    "MAIL_TEST_TOKEN": "secret-value-9384",
 }
 
 
@@ -57,10 +57,27 @@ class MailTestEndpointTests(unittest.TestCase):
             main,
             "_send_smtp_test_email",
         ):
-            result = asyncio.run(main.send_mail_test("test-token"))
+            result = asyncio.run(main.send_mail_test("secret-value-9384"))
 
         self.assertEqual(result, {"status": "ok", "message": "SMTP test email sent"})
         self.assertNotIn("smtp-secret", str(result))
+
+    def test_page_posts_token_in_header_without_exposing_secrets(self):
+        with patch.dict(os.environ, MAIL_ENV, clear=True):
+            response = main.mail_test_page()
+
+        body = response.body.decode("utf-8")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["cache-control"], "no-store")
+        self.assertIn("type=\"password\"", body)
+        self.assertIn("action=\"/internal/mail/test\"", body)
+        self.assertIn('method: "POST"', body)
+        self.assertIn('"X-Mail-Test-Token": token', body)
+        self.assertIn("Mail gönderildi", body)
+        self.assertNotIn(MAIL_ENV["MAIL_PASSWORD"], body)
+        self.assertNotIn(MAIL_ENV["MAIL_TEST_TOKEN"], body)
+        self.assertNotIn("console.", body)
+        self.assertNotIn("URLSearchParams", body)
 
 
 if __name__ == "__main__":
