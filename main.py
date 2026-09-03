@@ -1,11 +1,99 @@
+import hmac
 import os
 import psycopg2
+import smtplib
+import ssl
+from dataclasses import dataclass
+from email.message import EmailMessage
+from email.utils import parseaddr
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from pydantic import BaseModel
+from starlette.concurrency import run_in_threadpool
 
 
 app = FastAPI(title="LotRank Backend")
+
+
+@dataclass(frozen=True)
+class MailSettings:
+    host: str
+    port: int
+    user: str
+    password: str
+    from_value: str
+    from_address: str
+    admin_email: str
+
+
+def _load_mail_settings():
+    values = {
+        "host": os.getenv("MAIL_HOST", "").strip(),
+        "port": os.getenv("MAIL_PORT", "").strip(),
+        "user": os.getenv("MAIL_USER", "").strip(),
+        "password": os.getenv("MAIL_PASSWORD", ""),
+        "from_value": os.getenv("MAIL_FROM", "").strip(),
+        "admin_email": os.getenv("ADMIN_REPORT_EMAIL", "").strip(),
+    }
+    if not all(values.values()):
+        raise RuntimeError("Mail test is not configured")
+
+    try:
+        port = int(values["port"])
+    except ValueError:
+        raise RuntimeError("Mail test is not configured") from None
+    if not 1 <= port <= 65535:
+        raise RuntimeError("Mail test is not configured")
+
+    from_address = parseaddr(values["from_value"])[1].lower()
+    admin_email = parseaddr(values["admin_email"])[1]
+    if from_address != "info@lotrank.ai" or not admin_email:
+        raise RuntimeError("Mail test is not configured")
+
+    return MailSettings(
+        host=values["host"],
+        port=port,
+        user=values["user"],
+        password=values["password"],
+        from_value=values["from_value"],
+        from_address=from_address,
+        admin_email=admin_email,
+    )
+
+
+def _mail_test_token_is_valid(provided_token):
+    expected_token = os.getenv("MAIL_TEST_TOKEN", "")
+    if not expected_token or not provided_token:
+        return False
+    return hmac.compare_digest(
+        provided_token.encode("utf-8"),
+        expected_token.encode("utf-8"),
+    )
+
+
+def _send_smtp_test_email():
+    settings = _load_mail_settings()
+    message = EmailMessage()
+    message["From"] = settings.from_value
+    message["To"] = settings.admin_email
+    message["Subject"] = "LotRank SMTP test başarılı"
+    message.set_content("LotRank SMTP bağlantısı başarıyla doğrulandı.")
+
+    context = ssl.create_default_context()
+    smtp_class = smtplib.SMTP_SSL if settings.port == 465 else smtplib.SMTP
+    smtp_kwargs = {"host": settings.host, "port": settings.port, "timeout": 15}
+    if settings.port == 465:
+        smtp_kwargs["context"] = context
+
+    with smtp_class(**smtp_kwargs) as server:
+        if settings.port != 465:
+            server.starttls(context=context)
+        server.login(settings.user, settings.password)
+        server.send_message(
+            message,
+            from_addr=settings.from_address,
+            to_addrs=[settings.admin_email],
+        )
 
 
 # =========================================================
@@ -25,6 +113,21 @@ def health():
     return {
         "status": "healthy"
     }
+
+
+@app.post("/internal/mail/test")
+async def send_mail_test(
+    x_mail_test_token: str | None = Header(default=None, alias="X-Mail-Test-Token"),
+):
+    if not _mail_test_token_is_valid(x_mail_test_token):
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
+    try:
+        await run_in_threadpool(_send_smtp_test_email)
+    except Exception:
+        raise HTTPException(status_code=502, detail="SMTP test failed") from None
+
+    return {"status": "ok", "message": "SMTP test email sent"}
 
 
 # =========================================================
