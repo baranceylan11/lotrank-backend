@@ -15,6 +15,14 @@ from starlette.concurrency import run_in_threadpool
 
 app = FastAPI(title="LotRank Backend")
 
+SAFE_MAIL_ERROR_CODES = frozenset({
+    "invalid_token",
+    "missing_env",
+    "smtp_auth_failed",
+    "smtp_connect_failed",
+    "smtp_send_failed",
+})
+
 
 @dataclass(frozen=True)
 class MailSettings:
@@ -27,6 +35,16 @@ class MailSettings:
     admin_email: str
 
 
+class MailConfigurationError(Exception):
+    pass
+
+
+class MailDeliveryError(Exception):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
 def _load_mail_settings():
     values = {
         "host": os.getenv("MAIL_HOST", "").strip(),
@@ -37,19 +55,19 @@ def _load_mail_settings():
         "admin_email": os.getenv("ADMIN_REPORT_EMAIL", "").strip(),
     }
     if not all(values.values()):
-        raise RuntimeError("Mail test is not configured")
+        raise MailConfigurationError
 
     try:
         port = int(values["port"])
     except ValueError:
-        raise RuntimeError("Mail test is not configured") from None
+        raise MailConfigurationError from None
     if not 1 <= port <= 65535:
-        raise RuntimeError("Mail test is not configured")
+        raise MailConfigurationError
 
     from_address = parseaddr(values["from_value"])[1].lower()
     admin_email = parseaddr(values["admin_email"])[1]
     if from_address != "info@lotrank.ai" or not admin_email:
-        raise RuntimeError("Mail test is not configured")
+        raise MailConfigurationError
 
     return MailSettings(
         host=values["host"],
@@ -86,15 +104,39 @@ def _send_smtp_test_email():
     if settings.port == 465:
         smtp_kwargs["context"] = context
 
-    with smtp_class(**smtp_kwargs) as server:
-        if settings.port != 465:
-            server.starttls(context=context)
-        server.login(settings.user, settings.password)
-        server.send_message(
-            message,
-            from_addr=settings.from_address,
-            to_addrs=[settings.admin_email],
-        )
+    server = None
+    try:
+        try:
+            server = smtp_class(**smtp_kwargs)
+            if settings.port != 465:
+                server.starttls(context=context)
+        except (smtplib.SMTPException, OSError):
+            raise MailDeliveryError("smtp_connect_failed") from None
+
+        try:
+            server.login(settings.user, settings.password)
+        except smtplib.SMTPAuthenticationError:
+            raise MailDeliveryError("smtp_auth_failed") from None
+        except (smtplib.SMTPException, OSError):
+            raise MailDeliveryError("smtp_connect_failed") from None
+
+        try:
+            server.send_message(
+                message,
+                from_addr=settings.from_address,
+                to_addrs=[settings.admin_email],
+            )
+        except (smtplib.SMTPException, OSError):
+            raise MailDeliveryError("smtp_send_failed") from None
+    finally:
+        if server is not None:
+            try:
+                server.quit()
+            except Exception:
+                try:
+                    server.close()
+                except Exception:
+                    pass
 
 
 # =========================================================
@@ -121,12 +163,24 @@ async def send_mail_test(
     x_mail_test_token: str | None = Header(default=None, alias="X-Mail-Test-Token"),
 ):
     if not _mail_test_token_is_valid(x_mail_test_token):
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        raise HTTPException(status_code=401, detail={"code": "invalid_token"})
 
     try:
         await run_in_threadpool(_send_smtp_test_email)
+    except MailConfigurationError:
+        raise HTTPException(status_code=503, detail={"code": "missing_env"}) from None
+    except MailDeliveryError as error:
+        safe_code = (
+            error.code
+            if error.code in SAFE_MAIL_ERROR_CODES
+            else "smtp_send_failed"
+        )
+        raise HTTPException(status_code=502, detail={"code": safe_code}) from None
     except Exception:
-        raise HTTPException(status_code=502, detail="SMTP test failed") from None
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "smtp_send_failed"},
+        ) from None
 
     return {"status": "ok", "message": "SMTP test email sent"}
 
@@ -165,6 +219,13 @@ def mail_test_page():
     const tokenField = document.getElementById("mail-test-token");
     const submitButton = document.getElementById("submit-button");
     const status = document.getElementById("status");
+    const safeErrorCodes = new Set([
+      "invalid_token",
+      "missing_env",
+      "smtp_auth_failed",
+      "smtp_connect_failed",
+      "smtp_send_failed"
+    ]);
 
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
@@ -181,9 +242,19 @@ def mail_test_page():
           cache: "no-store",
           referrerPolicy: "no-referrer"
         });
-        status.textContent = response.ok ? "Mail gönderildi" : "Test maili gönderilemedi";
+        if (response.ok) {
+          status.textContent = "Mail gönderildi";
+        } else {
+          let code = "smtp_send_failed";
+          try {
+            const payload = await response.json();
+            const candidate = payload && payload.detail && payload.detail.code;
+            if (safeErrorCodes.has(candidate)) code = candidate;
+          } catch {}
+          status.textContent = `Test maili gönderilemedi: ${code}`;
+        }
       } catch {
-        status.textContent = "Test maili gönderilemedi";
+        status.textContent = "Test maili gönderilemedi: smtp_connect_failed";
       } finally {
         token = "";
         submitButton.disabled = false;
