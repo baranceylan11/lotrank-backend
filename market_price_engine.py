@@ -4,8 +4,10 @@ import re
 import statistics
 import unicodedata
 from dataclasses import dataclass
+from decimal import Decimal
 from typing import Dict, List, Optional, Tuple
 from urllib.parse import quote, urlparse
+from uuid import UUID
 
 import psycopg2
 import requests
@@ -122,6 +124,36 @@ def normalize_fuel(value: str) -> str:
         return "HYBRID"
 
     return normalized
+
+
+def database_writes_enabled() -> bool:
+    value = os.environ.get(
+        "MARKET_DATABASE_WRITES",
+        "",
+    )
+
+    return value.strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def normalize_market_spread(value: float) -> Decimal:
+    if not math.isfinite(value):
+        raise ValueError(
+            "Market spread must be a finite ratio"
+        )
+
+    ratio = max(0.0, min(1.0, value))
+
+    displayed_percent = round(ratio * 100)
+
+    return (
+        Decimal(displayed_percent)
+        / Decimal(100)
+    )
 
 
 def load_target_from_database() -> None:
@@ -1339,13 +1371,213 @@ def run_search_plan(
     return all_comparables, reached_sources
 
 
+def save_v11_score(
+    listing_id: str,
+    weighted_market_price: int,
+    safe_sale_value: int,
+    confidence: int,
+    lotrank_max: int,
+    remaining_bid_room: int,
+    bid_status: str,
+    estimated_net_profit: int,
+    market_spread: float,
+    target_profit: int,
+    risk_reserve: int,
+    lotrank_score: Optional[float] = None,
+) -> str:
+    database_url = os.environ.get("DATABASE_URL")
+
+    if not database_url:
+        raise RuntimeError("DATABASE_URL is missing")
+
+    normalized_listing_id = str(UUID(listing_id))
+    normalized_market_spread = (
+        normalize_market_spread(market_spread)
+    )
+
+    if not 0 <= confidence <= 100:
+        raise ValueError(
+            "Confidence must be between 0 and 100"
+        )
+
+    allowed_bid_statuses = {
+        "LOW_CONFIDENCE",
+        "AVOID",
+        "MAX_EXCEEDED",
+        "NEAR_MAX",
+        "BID_ROOM_AVAILABLE",
+    }
+
+    if bid_status not in allowed_bid_statuses:
+        raise ValueError("Invalid bid status")
+
+    non_negative_values = {
+        "weighted_market_price": weighted_market_price,
+        "safe_sale_value": safe_sale_value,
+        "lotrank_max": lotrank_max,
+        "target_profit": target_profit,
+        "risk_reserve": risk_reserve,
+    }
+
+    for name, value in non_negative_values.items():
+        if isinstance(value, bool) or value < 0:
+            raise ValueError(
+                f"{name} must be a non-negative number"
+            )
+
+    connection = psycopg2.connect(database_url)
+
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT pg_advisory_xact_lock(
+                    hashtext(%s)
+                );
+                """,
+                (normalized_listing_id,),
+            )
+
+            cursor.execute(
+                """
+                SELECT id, lotrank_score
+                FROM scores
+                WHERE listing_id = %s::uuid
+                ORDER BY calculated_at DESC
+                LIMIT 1
+                FOR UPDATE;
+                """,
+                (normalized_listing_id,),
+            )
+
+            existing_score = cursor.fetchone()
+
+            if existing_score:
+                score_value = (
+                    existing_score[1]
+                    if lotrank_score is None
+                    else lotrank_score
+                )
+
+                cursor.execute(
+                    """
+                    UPDATE scores
+                    SET
+                        listing_id = %s::uuid,
+                        lotrank_score = %s,
+                        confidence = %s,
+                        lotrank_max = %s,
+                        weighted_market_price = %s,
+                        safe_sale_value = %s,
+                        remaining_bid_room = %s,
+                        bid_status = %s,
+                        estimated_net_profit = %s,
+                        market_spread = %s,
+                        target_profit = %s,
+                        risk_reserve = %s,
+                        calculated_at = NOW()
+                    WHERE id = %s;
+                    """,
+                    (
+                        normalized_listing_id,
+                        score_value,
+                        confidence,
+                        lotrank_max,
+                        weighted_market_price,
+                        safe_sale_value,
+                        remaining_bid_room,
+                        bid_status,
+                        estimated_net_profit,
+                        normalized_market_spread,
+                        target_profit,
+                        risk_reserve,
+                        existing_score[0],
+                    ),
+                )
+
+                database_action = "UPDATED"
+
+            else:
+                if lotrank_score is None:
+                    raise RuntimeError(
+                        "No existing score row; refusing "
+                        "to invent a V11 lotrank_score"
+                    )
+
+                cursor.execute(
+                    """
+                    INSERT INTO scores (
+                        listing_id,
+                        lotrank_score,
+                        confidence,
+                        lotrank_max,
+                        weighted_market_price,
+                        safe_sale_value,
+                        remaining_bid_room,
+                        bid_status,
+                        estimated_net_profit,
+                        market_spread,
+                        target_profit,
+                        risk_reserve,
+                        calculated_at
+                    )
+                    VALUES (
+                        %s::uuid,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        NOW()
+                    );
+                    """,
+                    (
+                        normalized_listing_id,
+                        lotrank_score,
+                        confidence,
+                        lotrank_max,
+                        weighted_market_price,
+                        safe_sale_value,
+                        remaining_bid_room,
+                        bid_status,
+                        estimated_net_profit,
+                        normalized_market_spread,
+                        target_profit,
+                        risk_reserve,
+                    ),
+                )
+
+                database_action = "CREATED"
+
+        connection.commit()
+        return database_action
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
+
+
 def main() -> None:
+    writes_enabled = database_writes_enabled()
+
     print(
         f"=== {VERSION} START ==="
     )
 
     print("Database target mode: enabled")
-    print("Database writes: no")
+    print(
+        "Database writes:",
+        "yes" if writes_enabled else "no",
+    )
     print("Paid proxy fallback: disabled")
 
     load_target_from_database()
@@ -1887,6 +2119,36 @@ def main() -> None:
     print(
         "===== LOTRANK BID ENGINE END ====="
     )
+
+    if writes_enabled:
+        database_action = save_v11_score(
+            listing_id=CURRENT_LISTING_ID,
+            weighted_market_price=(
+                weighted_market_price
+            ),
+            safe_sale_value=safe_sale_value,
+            confidence=confidence,
+            lotrank_max=lotrank_max,
+            remaining_bid_room=(
+                remaining_bid_room
+            ),
+            bid_status=bid_status,
+            estimated_net_profit=(
+                estimated_net_profit
+            ),
+            market_spread=robust_spread,
+            target_profit=costs[
+                "target_profit"
+            ],
+            risk_reserve=costs[
+                "risk_reserve"
+            ],
+        )
+
+        print(
+            "Score database action:",
+            database_action,
+        )
 
     print(
         f"=== {VERSION} END ==="
