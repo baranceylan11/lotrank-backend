@@ -1,103 +1,11 @@
-import hmac
 import os
 import psycopg2
-import requests
-from dataclasses import dataclass
-from email.utils import parseaddr
 
-from fastapi import FastAPI, Header, HTTPException
-from fastapi.responses import HTMLResponse
+from fastapi import FastAPI
 from pydantic import BaseModel
-from starlette.concurrency import run_in_threadpool
 
 
 app = FastAPI(title="LotRank Backend")
-
-SAFE_MAIL_ERROR_CODES = frozenset({
-    "invalid_token",
-    "missing_env",
-    "resend_auth_failed",
-    "resend_connect_failed",
-    "resend_send_failed",
-})
-
-
-@dataclass(frozen=True)
-class ResendSettings:
-    api_key: str
-    from_value: str
-    from_address: str
-    admin_email: str
-
-
-class MailConfigurationError(Exception):
-    pass
-
-
-class MailDeliveryError(Exception):
-    def __init__(self, code):
-        self.code = code
-        super().__init__(code)
-
-
-def _load_resend_settings():
-    values = {
-        "api_key": os.getenv("RESEND_API_KEY", ""),
-        "from_value": os.getenv("MAIL_FROM", "").strip(),
-        "admin_email": os.getenv("ADMIN_REPORT_EMAIL", "").strip(),
-    }
-    if not all(values.values()):
-        raise MailConfigurationError
-
-    from_address = parseaddr(values["from_value"])[1].lower()
-    admin_email = parseaddr(values["admin_email"])[1]
-    if from_address != "info@lotrank.ai" or not admin_email:
-        raise MailConfigurationError
-
-    return ResendSettings(
-        api_key=values["api_key"],
-        from_value=values["from_value"],
-        from_address=from_address,
-        admin_email=admin_email,
-    )
-
-
-def _mail_test_token_is_valid(provided_token):
-    expected_token = os.getenv("MAIL_TEST_TOKEN", "")
-    if not expected_token or not provided_token:
-        return False
-    return hmac.compare_digest(
-        provided_token.encode("utf-8"),
-        expected_token.encode("utf-8"),
-    )
-
-
-def _send_resend_test_email():
-    settings = _load_resend_settings()
-    try:
-        response = requests.post(
-            "https://api.resend.com/emails",
-            headers={
-                "Authorization": f"Bearer {settings.api_key}",
-                "Accept": "application/json",
-            },
-            json={
-                "from": settings.from_value,
-                "to": [settings.admin_email],
-                "subject": "LotRank SMTP test başarılı",
-                "text": "LotRank mail bağlantısı başarıyla doğrulandı.",
-            },
-            timeout=15,
-        )
-    except (requests.Timeout, requests.ConnectionError):
-        raise MailDeliveryError("resend_connect_failed") from None
-    except requests.RequestException:
-        raise MailDeliveryError("resend_send_failed") from None
-
-    if response.status_code in (401, 403):
-        raise MailDeliveryError("resend_auth_failed")
-    if not 200 <= response.status_code < 300:
-        raise MailDeliveryError("resend_send_failed")
 
 
 # =========================================================
@@ -117,127 +25,6 @@ def health():
     return {
         "status": "healthy"
     }
-
-
-@app.post("/internal/mail/test")
-async def send_mail_test(
-    x_mail_test_token: str | None = Header(default=None, alias="X-Mail-Test-Token"),
-):
-    if not _mail_test_token_is_valid(x_mail_test_token):
-        raise HTTPException(status_code=401, detail={"code": "invalid_token"})
-
-    try:
-        await run_in_threadpool(_send_resend_test_email)
-    except MailConfigurationError:
-        raise HTTPException(status_code=503, detail={"code": "missing_env"}) from None
-    except MailDeliveryError as error:
-        safe_code = (
-            error.code
-            if error.code in SAFE_MAIL_ERROR_CODES
-            else "resend_send_failed"
-        )
-        raise HTTPException(status_code=502, detail={"code": safe_code}) from None
-    except Exception:
-        raise HTTPException(
-            status_code=502,
-            detail={"code": "resend_send_failed"},
-        ) from None
-
-    return {"status": "ok", "message": "Resend test email sent"}
-
-
-@app.get(
-    "/internal/mail/test-page",
-    response_class=HTMLResponse,
-    include_in_schema=False,
-)
-def mail_test_page():
-    content = """<!doctype html>
-<html lang="tr">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LotRank mail testi</title>
-  <style>
-    body { font-family: Arial, sans-serif; max-width: 420px; margin: 64px auto; padding: 0 20px; }
-    form { display: grid; gap: 14px; }
-    label { font-weight: 700; }
-    input, button { min-height: 44px; padding: 0 12px; font: inherit; }
-    button { cursor: pointer; }
-    #status { min-height: 24px; }
-  </style>
-</head>
-<body>
-  <h1>LotRank mail testi</h1>
-  <form id="mail-test-form" action="/internal/mail/test" method="post">
-    <label for="mail-test-token">MAIL_TEST_TOKEN</label>
-    <input id="mail-test-token" type="password" required autocomplete="off" spellcheck="false">
-    <button id="submit-button" type="submit">Test maili gönder</button>
-    <p id="status" role="status" aria-live="polite"></p>
-  </form>
-  <script>
-    const form = document.getElementById("mail-test-form");
-    const tokenField = document.getElementById("mail-test-token");
-    const submitButton = document.getElementById("submit-button");
-    const status = document.getElementById("status");
-    const safeErrorCodes = new Set([
-      "invalid_token",
-      "missing_env",
-      "resend_auth_failed",
-      "resend_connect_failed",
-      "resend_send_failed"
-    ]);
-
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      let token = tokenField.value;
-      tokenField.value = "";
-      submitButton.disabled = true;
-      status.textContent = "Gönderiliyor…";
-
-      try {
-        const response = await fetch(form.action, {
-          method: "POST",
-          headers: { "X-Mail-Test-Token": token, "Accept": "application/json" },
-          credentials: "same-origin",
-          cache: "no-store",
-          referrerPolicy: "no-referrer"
-        });
-        if (response.ok) {
-          status.textContent = "Mail gönderildi";
-        } else {
-          let code = "resend_send_failed";
-          try {
-            const payload = await response.json();
-            const candidate = payload && payload.detail && payload.detail.code;
-            if (safeErrorCodes.has(candidate)) code = candidate;
-          } catch {}
-          status.textContent = `Test maili gönderilemedi: ${code}`;
-        }
-      } catch {
-        status.textContent = "Test maili gönderilemedi: resend_connect_failed";
-      } finally {
-        token = "";
-        submitButton.disabled = false;
-        tokenField.focus();
-      }
-    });
-  </script>
-</body>
-</html>"""
-    return HTMLResponse(
-        content=content,
-        headers={
-            "Cache-Control": "no-store",
-            "Pragma": "no-cache",
-            "X-Content-Type-Options": "nosniff",
-            "Content-Security-Policy": (
-                "default-src 'none'; style-src 'unsafe-inline'; "
-                "script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; "
-                "base-uri 'none'; frame-ancestors 'none'"
-            ),
-        },
-    )
 
 
 # =========================================================
@@ -650,7 +437,6 @@ def score_listing(listing_id: str, data: LotRankInput):
     cur = None
 
     try:
-        # Önce mevcut LotRank motoruyla hesapla
         result = score_preview(data)
 
         conn = psycopg2.connect(
@@ -659,7 +445,6 @@ def score_listing(listing_id: str, data: LotRankInput):
 
         cur = conn.cursor()
 
-        # İlan gerçekten var mı kontrol et
         cur.execute(
             """
             SELECT id, title
@@ -680,7 +465,6 @@ def score_listing(listing_id: str, data: LotRankInput):
                 "detail": "LISTING_NOT_FOUND"
             }
 
-        # Bu ilana daha önce score yazılmış mı?
         cur.execute(
             """
             SELECT id
@@ -1107,7 +891,6 @@ async def import_domaine(data: DomaineImportInput):
             listing_input
         )
 
-        # Domaine risklerini risk_flags tablosuna kaydet
         listing_id = result.get("listing_id")
         domaine_risks = parsed.get("risk_flags", [])
 
@@ -1155,4 +938,3 @@ async def import_domaine(data: DomaineImportInput):
             "status": "error",
             "detail": str(e)
         }
-      
