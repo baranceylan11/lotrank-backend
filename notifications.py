@@ -12,7 +12,7 @@ ALLOWED_NOTIFICATION_CATEGORIES = frozenset({
     "critical_system_error",
     "high_value_opportunity",
     "investor_reply",
-    "daily_admin_summary",
+    "weekly_admin_summary",
 })
 
 SAFE_MAIL_ERROR_CODES = frozenset({
@@ -56,28 +56,28 @@ class MailDeliveryError(Exception):
 class NotificationGate:
     """Process-local duplicate suppression for the low-volume pilot.
 
-    This intentionally does not create a scheduler or external state dependency.
-    A later production phase can move the state to the database if multi-instance
-    delivery is enabled.
+    No scheduler or external state dependency is created. A later production
+    phase can move state to the database if multi-instance delivery is enabled.
     """
 
     def __init__(self):
         self._lock = threading.Lock()
         self._sent_at = {}
-        self._daily_summary_dates = set()
+        self._weekly_summary_keys = set()
 
     def reset(self):
         with self._lock:
             self._sent_at.clear()
-            self._daily_summary_dates.clear()
+            self._weekly_summary_keys.clear()
 
     def allow(self, category, fingerprint, now, debounce_seconds):
         with self._lock:
-            if category == "daily_admin_summary":
-                day_key = now.date().isoformat()
-                if day_key in self._daily_summary_dates:
+            if category == "weekly_admin_summary":
+                iso_year, iso_week, _ = now.isocalendar()
+                week_key = f"{iso_year}-W{iso_week:02d}"
+                if week_key in self._weekly_summary_keys:
                     return False
-                self._daily_summary_dates.add(day_key)
+                self._weekly_summary_keys.add(week_key)
                 return True
 
             previous = self._sent_at.get(fingerprint)
@@ -193,8 +193,8 @@ def _send_resend_email(subject, text):
 def send_pilot_notification(category, event_key, subject, text, *, now=None):
     """Send one approved pilot notification.
 
-    Routine/unknown categories are rejected without touching Resend. The caller
-    must explicitly qualify high-value opportunities before calling this helper.
+    Routine/unknown categories are rejected without touching Resend. High-value
+    opportunities must be explicitly qualified by the caller before this helper.
     """
     if category not in ALLOWED_NOTIFICATION_CATEGORIES:
         return {"status": "suppressed", "reason": "category_not_allowed"}
