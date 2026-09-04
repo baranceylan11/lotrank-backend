@@ -28,7 +28,7 @@ class PilotNotificationTests(unittest.TestCase):
                 "critical_system_error",
                 "high_value_opportunity",
                 "investor_reply",
-                "daily_admin_summary",
+                "weekly_admin_summary",
             },
         )
         with patch.object(notifications, "_send_resend_email") as send:
@@ -58,25 +58,25 @@ class PilotNotificationTests(unittest.TestCase):
         self.assertEqual(second["status"], "suppressed")
         send.assert_called_once()
 
-    def test_daily_summary_is_limited_to_once_per_calendar_day(self):
-        day = datetime(2026, 9, 4, 8, 0, tzinfo=timezone.utc)
+    def test_weekly_summary_is_limited_to_once_per_iso_week(self):
+        thursday = datetime(2026, 9, 3, 8, 0, tzinfo=timezone.utc)
         with patch.object(notifications, "_send_resend_email") as send:
             first = notifications.send_pilot_notification(
-                "daily_admin_summary", "summary-a", "Daily summary", "A", now=day
+                "weekly_admin_summary", "summary-a", "Weekly summary", "A", now=thursday
             )
             second = notifications.send_pilot_notification(
-                "daily_admin_summary",
+                "weekly_admin_summary",
                 "summary-b",
-                "Daily summary updated",
+                "Weekly summary updated",
                 "B",
-                now=day + timedelta(hours=10),
+                now=thursday + timedelta(days=2),
             )
             third = notifications.send_pilot_notification(
-                "daily_admin_summary",
+                "weekly_admin_summary",
                 "summary-c",
-                "Next daily summary",
+                "Next weekly summary",
                 "C",
-                now=day + timedelta(days=1),
+                now=thursday + timedelta(days=7),
             )
         self.assertEqual(first["status"], "sent")
         self.assertEqual(second["status"], "suppressed")
